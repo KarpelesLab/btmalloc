@@ -1,40 +1,51 @@
 /*
  * btmalloc — libc symbol overrides for LD_PRELOAD.
  *
- * This translation unit is compiled only into the shared library (never the
- * static library that the tests link against, to avoid hijacking libc malloc
- * inside the test process). When the resulting libbtmalloc.so is LD_PRELOAD'd,
- * these definitions shadow glibc's malloc family.
+ * Compiled only into the shared library. When LD_PRELOAD'd, these shadow
+ * glibc's malloc family.
  *
- * Phase 0 note: these are thin wrappers over the public btm_* API so we can
- * benchmark btmalloc against glibc/jemalloc immediately. Phase A will thread
- * the caller's return address (__builtin_return_address(0)) through to the
- * allocator core for PC anchoring; at that point malloc() must remain exactly
- * one frame deep so the captured RA is the user's call site.
+ * PC anchoring: malloc/calloc/realloc capture __builtin_return_address(0) —
+ * the user's call site — and pass it straight to the RA-threaded core entry
+ * points. Each wrapper is exactly one frame deep, so the captured address is
+ * the real caller, not this shim. (aligned_alloc/posix_memalign go through the
+ * public entry points and thus anchor on this shim; aligned small allocations
+ * are rare, so that imprecision is acceptable for now.)
+ *
+ * glibc reaches malloc internally via the __libc_* names too (strdup,
+ * vasprintf, getline, ...); aliasing those keeps all allocations flowing
+ * through btmalloc so they can be freed through it.
  */
 
-#include "btmalloc.h"
+#include "internal.h"
 
 #include <stddef.h>
 
 #define BTM_EXPORT __attribute__((visibility("default")))
 
-/* The C library also reaches malloc internally through these __libc_* names
- * (strdup, vasprintf, getline, ...). Providing them avoids subtle bugs where
- * some allocations bypass our allocator and then get freed through it. */
-
-BTM_EXPORT void *malloc(size_t size) { return btm_malloc(size); }
-BTM_EXPORT void  free(void *ptr) { btm_free(ptr); }
-BTM_EXPORT void *calloc(size_t n, size_t s) { return btm_calloc(n, s); }
-BTM_EXPORT void *realloc(void *p, size_t s) { return btm_realloc(p, s); }
+BTM_EXPORT void *malloc(size_t size) {
+    return btm_malloc_at(size, __builtin_return_address(0));
+}
+BTM_EXPORT void free(void *ptr) { btm_free(ptr); }
+BTM_EXPORT void *calloc(size_t n, size_t s) {
+    return btm_calloc_at(n, s, __builtin_return_address(0));
+}
+BTM_EXPORT void *realloc(void *p, size_t s) {
+    return btm_realloc_at(p, s, __builtin_return_address(0));
+}
 BTM_EXPORT void *reallocarray(void *p, size_t n, size_t s) {
     return btm_reallocarray(p, n, s);
 }
 
-BTM_EXPORT void *__libc_malloc(size_t size) { return btm_malloc(size); }
-BTM_EXPORT void  __libc_free(void *ptr) { btm_free(ptr); }
-BTM_EXPORT void *__libc_calloc(size_t n, size_t s) { return btm_calloc(n, s); }
-BTM_EXPORT void *__libc_realloc(void *p, size_t s) { return btm_realloc(p, s); }
+BTM_EXPORT void *__libc_malloc(size_t size) {
+    return btm_malloc_at(size, __builtin_return_address(0));
+}
+BTM_EXPORT void __libc_free(void *ptr) { btm_free(ptr); }
+BTM_EXPORT void *__libc_calloc(size_t n, size_t s) {
+    return btm_calloc_at(n, s, __builtin_return_address(0));
+}
+BTM_EXPORT void *__libc_realloc(void *p, size_t s) {
+    return btm_realloc_at(p, s, __builtin_return_address(0));
+}
 
 BTM_EXPORT int posix_memalign(void **out, size_t align, size_t size) {
     return btm_posix_memalign(out, align, size);
@@ -42,7 +53,6 @@ BTM_EXPORT int posix_memalign(void **out, size_t align, size_t size) {
 BTM_EXPORT void *aligned_alloc(size_t align, size_t size) {
     return btm_aligned_alloc(align, size);
 }
-/* Legacy aligned-allocation entry points. */
 BTM_EXPORT void *memalign(size_t align, size_t size) {
     return btm_aligned_alloc(align, size);
 }
@@ -58,6 +68,5 @@ BTM_EXPORT size_t malloc_usable_size(void *ptr) {
     return btm_malloc_usable_size(ptr);
 }
 
-/* Weak no-op stubs for tuning/introspection calls some programs make. We do
- * not honor them yet; returning benign values keeps such programs running. */
+/* Tuning/introspection no-ops so programs that call them keep running. */
 BTM_EXPORT int mallopt(int param, int value) { (void)param; (void)value; return 1; }

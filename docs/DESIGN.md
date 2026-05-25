@@ -166,8 +166,11 @@ measured delta, not a guess.
 ## Build phases
 
 - **M0** ✔ — CMake skeleton + dumb mmap-per-alloc baseline (commit ad48755).
-- **Phase 0** — benchmark + profiling harness; baseline glibc/jemalloc numbers.
-- **Phase A** — PC-anchored partitioned core (replaces M0).
+- **Phase 0** ✔ — benchmark + profiling harness; baseline glibc/jemalloc numbers.
+- **Phase A** ✔ — PC-anchored partitioned core (replaces M0). Correct
+  (shadow-map stress + ASan clean); competitive throughput; **wins
+  producer/consumer cross-thread-free at every thread count** (see
+  bench/RESULTS.md). Open: small-object single-thread fast path trails jemalloc.
 - **Phase B** — lifetime cohorting + bulk slab reclaim.
 - **Phase C** — async backing-store via io_uring.
 - **Phase D** — hotness tracking + tiering + compaction.

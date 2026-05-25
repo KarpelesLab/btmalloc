@@ -11,3 +11,4 @@ function(btm_add_test name)
 endfunction()
 
 btm_add_test(test_basic)
+btm_add_test(test_stress)

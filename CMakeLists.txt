@@ -69,6 +69,11 @@ endif()
 # not hijack libc malloc inside the test process.
 set(BTMALLOC_CORE_SOURCES
     src/btmalloc.c
+    src/size_class.c
+    src/chunk.c
+    src/partition.c
+    src/tcache.c
+    src/large.c
 )
 
 # Compile the core once as position-independent objects, reused by both libs.
