@@ -29,6 +29,7 @@ btm_partition_t *btm_partitions;
 unsigned         btm_nparts = 1;
 _Atomic(int)     btm_ready;
 int              btm_intern_mode;
+int              btm_mesh_mode;
 
 static pthread_once_t btm_init_once = PTHREAD_ONCE_INIT;
 
@@ -131,6 +132,13 @@ static void btm_do_init(void) {
 
     btm_partitions = parts;
     btm_nparts = np;
+
+    /* Optional memfd-backed chunks enabling Mesh-style compaction. Must be set
+     * before any chunk is mapped. */
+    {
+        const char *m = getenv("BTM_MESH");
+        if (m && m[0] == '1' && btm_mesh_enable()) btm_mesh_mode = 1;
+    }
 
     /* Optional deterministic call-site -> partition interning. */
     const char *mode = getenv("BTM_PARTITION_MODE");

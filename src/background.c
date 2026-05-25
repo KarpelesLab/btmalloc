@@ -21,6 +21,7 @@
 
 #include "internal.h"
 
+#include <fcntl.h>
 #include <liburing.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -47,21 +48,123 @@ static int             bg_ring_ok;
 
 static const size_t kData = BTM_CHUNK_SIZE - BTM_PAGE_SIZE; /* pages 1..511 */
 
+/* ---- mesh-mode memfd backing ---- *
+ *
+ * In mesh mode chunks are backed by a single memfd (one fd) so that two slabs
+ * with non-overlapping live slots can later be remapped (MAP_FIXED) onto one
+ * physical page. Each chunk occupies a CHUNK_SIZE-aligned offset in the memfd;
+ * offsets are bump-allocated and recycled through a small free stack. Physical
+ * pages are released with fallocate(PUNCH_HOLE) instead of MADV_DONTNEED. */
+static int             memfd = -1;
+static uint64_t        memfd_bump;          /* next never-used offset */
+static uint64_t        memfd_size;          /* current ftruncate size */
+static uint64_t       *memfd_free;          /* stack of recycled offsets */
+static unsigned        memfd_free_n, memfd_free_cap;
+static pthread_mutex_t memfd_lock = PTHREAD_MUTEX_INITIALIZER;
+
+int btm_mesh_enable(void) {
+    int fd = memfd_create("btmalloc", MFD_CLOEXEC);
+    if (fd < 0) return 0;
+    memfd = fd;
+    memfd_bump = 0;
+    memfd_size = 0;
+    return 1;
+}
+
+/* Allocate a CHUNK_SIZE region in the memfd; returns its offset or UINT64_MAX. */
+static uint64_t memfd_alloc_off(void) {
+    pthread_mutex_lock(&memfd_lock);
+    uint64_t off;
+    if (memfd_free_n > 0) {
+        off = memfd_free[--memfd_free_n];
+    } else {
+        off = memfd_bump;
+        memfd_bump += BTM_CHUNK_SIZE;
+        if (memfd_bump > memfd_size) {
+            uint64_t want = memfd_size + 256 * BTM_CHUNK_SIZE; /* grow in slabs */
+            if (want < memfd_bump) want = memfd_bump;
+            if (ftruncate(memfd, (off_t)want) == 0) memfd_size = want;
+            else { memfd_bump -= BTM_CHUNK_SIZE; off = UINT64_MAX; }
+        }
+    }
+    pthread_mutex_unlock(&memfd_lock);
+    return off;
+}
+
+static void memfd_free_off(uint64_t off) {
+    pthread_mutex_lock(&memfd_lock);
+    if (memfd_free_n == memfd_free_cap) {
+        unsigned ncap = memfd_free_cap ? memfd_free_cap * 2 : 64;
+        uint64_t *n = mmap(NULL, ncap * sizeof(uint64_t), PROT_READ | PROT_WRITE,
+                           MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        if (n != MAP_FAILED) {
+            for (unsigned i = 0; i < memfd_free_n; i++) n[i] = memfd_free[i];
+            if (memfd_free) munmap(memfd_free, memfd_free_cap * sizeof(uint64_t));
+            memfd_free = n;
+            memfd_free_cap = ncap;
+        }
+    }
+    if (memfd_free_n < memfd_free_cap) memfd_free[memfd_free_n++] = off;
+    /* else: drop the offset (leak in the memfd address space; rare). */
+    pthread_mutex_unlock(&memfd_lock);
+}
+
+/* Release a chunk's data pages back to the OS. */
+static void chunk_decommit(btm_chunk_t *c) {
+    if (btm_mesh_mode) {
+        fallocate(memfd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                  (off_t)(c->memfd_off + BTM_PAGE_SIZE), (off_t)kData);
+    } else {
+        madvise((char *)c + BTM_PAGE_SIZE, kData, MADV_DONTNEED);
+    }
+}
+
 /* ---- low-level chunk map / header ---- */
 
 static btm_chunk_t *map_fresh(void) {
+    uint64_t off = 0;
+    if (btm_mesh_mode) {
+        off = memfd_alloc_off();
+        if (off == UINT64_MAX) return NULL;
+    }
+
+    /* Reserve a CHUNK_SIZE-aligned virtual range. */
     size_t want = BTM_CHUNK_SIZE * 2;
-    void *raw = mmap(NULL, want, PROT_READ | PROT_WRITE,
-                     MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    if (raw == MAP_FAILED) return NULL;
+    void *raw = mmap(NULL, want, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (raw == MAP_FAILED) { if (btm_mesh_mode) memfd_free_off(off); return NULL; }
     uintptr_t base = ((uintptr_t)raw + BTM_CHUNK_SIZE - 1) & ~(BTM_CHUNK_SIZE - 1);
     size_t front = base - (uintptr_t)raw;
     if (front) munmap(raw, front);
     size_t back = want - front - BTM_CHUNK_SIZE;
     if (back) munmap((void *)(base + BTM_CHUNK_SIZE), back);
+
+    void *p;
+    if (btm_mesh_mode) {
+        /* Back the aligned range with the memfd so it can be meshed later. */
+        p = mmap((void *)base, BTM_CHUNK_SIZE, PROT_READ | PROT_WRITE,
+                 MAP_SHARED | MAP_FIXED, memfd, (off_t)off);
+    } else {
+        p = mmap((void *)base, BTM_CHUNK_SIZE, PROT_READ | PROT_WRITE,
+                 MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
+    }
+    if (p == MAP_FAILED) {
+        munmap((void *)base, BTM_CHUNK_SIZE);
+        if (btm_mesh_mode) memfd_free_off(off);
+        return NULL;
+    }
+
     madvise((void *)base, BTM_CHUNK_SIZE, MADV_HUGEPAGE);
+    if (btm_mesh_mode) {
+        /* MAP_SHARED memfd memory would be shared with a fork() child and let
+         * it corrupt the parent's heap. MADV_DONTFORK drops it from the child
+         * so a child heap access faults loudly instead. Mesh mode is therefore
+         * not safe across fork-without-exec; see docs. */
+        madvise((void *)base, BTM_CHUNK_SIZE, MADV_DONTFORK);
+    }
     btm_registry_insert(base, BTM_CHUNK_SIZE, base);
-    return (btm_chunk_t *)base;
+    btm_chunk_t *c = (btm_chunk_t *)base;
+    c->memfd_off = off;
+    return c;
 }
 
 static void chunk_init_header(btm_chunk_t *c, btm_scpool_t *pool) {
@@ -74,15 +177,13 @@ static void chunk_init_header(btm_chunk_t *c, btm_scpool_t *pool) {
         c->page_owner[i] = BTM_PAGE_NONE;
 }
 
-/* ---- madvise (io_uring batched, else synchronous) ---- */
+/* ---- decommit (io_uring-batched madvise, else synchronous) ---- */
 
-static void madvise_one(btm_chunk_t *c) {
-    madvise((char *)c + BTM_PAGE_SIZE, kData, MADV_DONTNEED);
-}
-
-static void madvise_batch(btm_chunk_t *list) {
-    if (!bg_ring_ok) {
-        for (btm_chunk_t *c = list; c; c = c->next) madvise_one(c);
+static void decommit_batch(btm_chunk_t *list) {
+    /* Mesh mode releases memfd pages with fallocate(PUNCH_HOLE), which has no
+     * io_uring fast path here; do it synchronously per chunk. */
+    if (btm_mesh_mode || !bg_ring_ok) {
+        for (btm_chunk_t *c = list; c; c = c->next) chunk_decommit(c);
         return;
     }
     unsigned pending = 0;
@@ -96,7 +197,7 @@ static void madvise_batch(btm_chunk_t *list) {
                 pending--;
             }
             sqe = io_uring_get_sqe(&bg_ring);
-            if (!sqe) { madvise_one(c); continue; } /* shouldn't happen */
+            if (!sqe) { chunk_decommit(c); continue; } /* shouldn't happen */
         }
         io_uring_prep_madvise(sqe, (char *)c + BTM_PAGE_SIZE, kData, MADV_DONTNEED);
         pending++;
@@ -125,8 +226,8 @@ static void *bg_main(void *arg) {
         dispose_head = NULL;
         pthread_mutex_unlock(&bg_lock);
 
-        /* Release physical pages of all disposed chunks in one io_uring batch. */
-        if (disp) madvise_batch(disp);
+        /* Release physical pages of all disposed chunks. */
+        if (disp) decommit_batch(disp);
 
         /* Return cleaned chunks to the warm pool; trim the overflow to the OS. */
         btm_chunk_t *trim = NULL;
@@ -148,8 +249,10 @@ static void *bg_main(void *arg) {
 
         while (trim) {
             btm_chunk_t *next = trim->next;
+            uint64_t off = trim->memfd_off;
             btm_registry_remove((uintptr_t)trim, BTM_CHUNK_SIZE);
             munmap(trim, BTM_CHUNK_SIZE);
+            if (btm_mesh_mode) memfd_free_off(off);
             trim = next;
         }
 
@@ -226,7 +329,8 @@ void btm_chunk_dispose(btm_chunk_t *c) {
         return;
     }
     /* Synchronous fallback: release pages here, recycle or trim inline. */
-    madvise_one(c);
+    chunk_decommit(c);
+    uint64_t off = c->memfd_off;
     pthread_mutex_lock(&bg_lock);
     int warm = warm_count < BTM_WARM_HIGH;
     if (warm) { c->next = warm_head; warm_head = c; warm_count++; }
@@ -234,6 +338,7 @@ void btm_chunk_dispose(btm_chunk_t *c) {
     if (!warm) {
         btm_registry_remove((uintptr_t)c, BTM_CHUNK_SIZE);
         munmap(c, BTM_CHUNK_SIZE);
+        if (btm_mesh_mode) memfd_free_off(off);
     }
     bg_kick(); /* try to bring the maintenance thread up for next time */
 }

@@ -63,6 +63,7 @@ typedef struct btm_chunk {
     struct btm_chunk *next, *prev;    /* pool's chunk list */
     uint32_t          next_free_page; /* bump pointer for slab carving */
     uint32_t          live_slabs;     /* carved slabs not yet fully freed */
+    uint64_t          memfd_off;      /* offset in the backing memfd (mesh mode) */
     uint16_t          page_owner[BTM_PAGES_PER_CHUNK];
 } btm_chunk_t;
 
@@ -146,6 +147,7 @@ extern btm_partition_t *btm_partitions BTM_HIDDEN;
 extern unsigned         btm_nparts BTM_HIDDEN;          /* power of two */
 extern _Atomic(int)     btm_ready BTM_HIDDEN;
 extern int              btm_intern_mode BTM_HIDDEN;     /* 1 = deterministic */
+extern int              btm_mesh_mode BTM_HIDDEN;       /* 1 = memfd-backed + compaction */
 void                    btm_ensure_init(void) BTM_HIDDEN;
 /* Deterministic call-site -> partition interning (BTM_PARTITION_MODE=intern):
  * each distinct return address gets its own partition until P is exhausted.
@@ -193,6 +195,8 @@ btm_chunk_t *btm_chunk_obtain(btm_scpool_t *pool) BTM_HIDDEN;
 void        btm_chunk_dispose(btm_chunk_t *c) BTM_HIDDEN;
 /* Reset async/background state in a fork() child (no maintenance thread there). */
 void        btm_bg_atfork_child(void) BTM_HIDDEN;
+/* Create the backing memfd for mesh mode. Returns 1 on success. */
+int         btm_mesh_enable(void) BTM_HIDDEN;
 /* Register / unregister the 2 MiB regions [base, base+len) -> owner. */
 void        btm_registry_insert(uintptr_t base, size_t len, uintptr_t owner) BTM_HIDDEN;
 void        btm_registry_remove(uintptr_t base, size_t len) BTM_HIDDEN;
