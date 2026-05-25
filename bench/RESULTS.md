@@ -13,6 +13,33 @@ Numbers are indicative single runs, not averaged — treat as deltas, not
 absolutes. Reproduce with `bench/fetch_allocators.sh && bench/run.sh build` (or
 a subset with `BENCH_ALLOCATORS="glibc snmalloc btmalloc"`).
 
+## Key conclusions
+
+Where btmalloc stands, distilled from the data below (full eight-way table in the
+next section):
+
+1. **Cross-thread free and memory footprint are real, defended wins.** Against
+   seven other allocators (incl. snmalloc and tcmalloc), btmalloc ties snmalloc
+   for fastest producer/consumer and is the tightest of all eight on RSS (2.4×
+   live vs ~16-18× for every other performance allocator). These are the design
+   thesis, validated.
+2. **The single-thread small-object gap is structural, not a bug.** It's
+   execution-bound (not cache-bound), ~2× the instruction count of mimalloc's
+   fast path, spread evenly across the call-site hash + fault-free pointer
+   resolve + bin machinery. No single bottleneck; most of it buys the features.
+3. **Three things were measured and rejected** — recorded so they aren't
+   re-chased:
+   - *Trust-free resolve* (mask to the 2 MiB base, read magic): ~30% faster on
+     churn but **faults on foreign frees** (crashed `ls` ~45% of runs). The
+     fault-free owner table is the price of being a safe drop-in.
+   - *Relaxing the rcache acquire-load*: <1% — on x86 it was already a plain MOV;
+     the "barrier" theory was wrong.
+   - *The per-thread rcache itself*: doesn't earn its keep — `nocache` (plain
+     radix) matches or beats it everywhere measured.
+4. **Knobs, with measured costs:** `BTM_HARDENING` (~4%), `BTM_PARTITIONING`
+   (off ≈ 7-12% faster churn, loses call-site features), `BTM_OWNER_ENGINE`
+   (registry/flat/nocache; resolver choice is ~noise on real workloads).
+
 ## Four-way summary (glibc / jemalloc / mimalloc / btmalloc)
 
 | metric (units)                              | glibc | jemalloc | mimalloc | btmalloc |

@@ -9,33 +9,41 @@ cohorting, memory reclamation, and (future) security all derive from it.
 See [docs/DESIGN.md](docs/DESIGN.md) for the full rationale and
 [bench/RESULTS.md](bench/RESULTS.md) for measurements.
 
-## Highlights (vs glibc and jemalloc on this machine)
+## Highlights (vs 7 other allocators on this machine)
 
-- **Producer/consumer (cross-thread free): fastest of the three at every thread
-  count** (2–32). A freed slot returns to its home *partition* regardless of
-  which thread frees it — no per-thread-arena ownership transfer to contend on.
-- **~6.5× less resident memory** after a fragmenting churn workload (29 MB
-  steady / 19 MB drained, vs glibc ~190 and jemalloc ~203) — call-site cohorting
-  plus per-class empty-slab decommit (out-of-line slab metadata) return memory
-  the others keep.
-- **2× faster than jemalloc** on repeated grow/free cycles — a warm-chunk pool
-  eliminates mmap/munmap thrash.
+Benchmarked head-to-head against glibc, jemalloc, mimalloc, **tcmalloc**,
+**snmalloc**, **ffmalloc**, and **hardened_malloc** (the last four built from
+source by `bench/fetch_allocators.sh`). Full table in
+[bench/RESULTS.md](bench/RESULTS.md).
+
+- **Cross-thread free: tied for fastest.** Producer/consumer at 8 threads,
+  btmalloc (10.3 Mops) is statistically tied with **snmalloc** (10.4) — the
+  state-of-the-art message-passing allocator — and ahead of mimalloc (7.8),
+  tcmalloc (6.5), and jemalloc (5.6). A freed slot returns to its home
+  *partition* regardless of which thread frees it: no arena-ownership transfer
+  to contend on.
+- **Tightest memory footprint of all eight.** Under fragmenting churn btmalloc
+  holds 2.4× live bytes (27 MB) and drains to 19 MB. *Every* mainstream
+  performance allocator — glibc, jemalloc, mimalloc, tcmalloc, and snmalloc —
+  sits at ~16–18× (≈190–206 MB) and never gives it back. Only dedicated security
+  allocators approach it (ffmalloc 4.1×, hardened_malloc 3.5×), and far slower.
+- **Faster than dedicated security allocators, at comparable memory release**
+  (6.9 ns churn vs ffmalloc 14, hardened_malloc 27; 519 vs 50 Mops local).
 - **Live-data cold tiering** (`btm_pageout_cold()`): evicts cold-but-live data
-  to swap (94% RSS drop in the demo); objects fault back transparently. Attacks
-  the "hotness fragmentation" problem from recent (2025-26) research.
+  to swap (94% RSS drop in the demo); objects fault back transparently.
 - Drop-in via `LD_PRELOAD`: runs python, git, gcc, perl, bash, and parallel
-  builds cleanly.
+  builds cleanly — and ran every benchmark without aborting (ffmalloc and
+  hardened_malloc did not).
 - **Security** (compile-time `BTM_HARDENING`, on by default; ≈3-4% churn cost):
-  freelist safe-linking (obfuscated free-pointers) and double-free detection;
-  plus optional deterministic per-call-site segregation
-  (`BTM_PARTITION_MODE=intern`, a Cling/SeMalloc-style anti-type-confusion
-  guarantee) and a zero-cost call-site heap profiler that can attribute a
-  corrupted slab to where it was allocated.
+  freelist safe-linking and double-free detection; plus optional deterministic
+  per-call-site segregation (`BTM_PARTITION_MODE=intern`) and a zero-cost
+  call-site heap profiler.
 
-Trade-off: the single-threaded small-object fast path trails jemalloc
-(~6.7 ns vs ~2.3 ns) — the cost of hashing a call site into a cache bin instead
-of indexing a per-size-class array. Wins are on scaling, cross-thread free, and
-memory footprint.
+Trade-off: the single-threaded small-object fast path trails the performance
+pack (~6.9 ns vs snmalloc 2.0 / jemalloc–tcmalloc 2.3 / mimalloc 2.8) — the cost
+of hashing a call site and resolving pointers through a fault-free owner table
+rather than indexing a per-size-class array. The wins are scaling, cross-thread
+free, and memory footprint. `p999` tail latency is near-best (18 ns).
 
 ## How it works (one paragraph)
 
@@ -147,12 +155,22 @@ tied with snmalloc on cross-thread free and tightest on memory footprint).
 
 ## Status
 
-The five build phases (PC-anchored core, lifetime cohorting + reclaim, async
-io_uring backing, empty-slab decommit, LD_PRELOAD hardening) are complete and
-benchmark-validated. Known future work: object-moving (Mesh-style) compaction,
-live-data hotness tiering via access sampling, per-partition adaptive size
-classes, and closing the single-thread small-object gap. See
-[docs/DESIGN.md](docs/DESIGN.md).
+Complete and benchmark-validated: the PC-anchored partitioned core, lifetime
+cohorting + bulk reclaim, async io_uring backing, empty-slab decommit, LD_PRELOAD
+hardening, out-of-line slab metadata, Mesh-style compaction (`BTM_MESH=1`),
+live-data cold tiering (`btm_pageout_cold`), security hardening, the call-site
+heap profiler, and a fuzzer. Resolution strategy and the two defining features
+are build-time selectable (`BTM_OWNER_ENGINE`, `BTM_PARTITIONING`,
+`BTM_HARDENING`); btmalloc is benchmarked against seven other allocators via
+`bench/fetch_allocators.sh` + `bench/run.sh`.
+
+Characterized but not "fixed" (they're structural, not bugs — see
+[bench/RESULTS.md](bench/RESULTS.md)): the single-thread small-object gap is the
+cost of the call-site machinery, not a removable bottleneck; the fault-free owner
+resolve is the price of being a safe drop-in (a mask-and-trust shortcut was
+measured and rejected for crashing on foreign frees). Open future work:
+per-partition adaptive size classes, and a "fat" pagemap owner engine that
+returns size-class metadata directly. See [docs/DESIGN.md](docs/DESIGN.md).
 
 ## License
 
