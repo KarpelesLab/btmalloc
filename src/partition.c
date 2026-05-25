@@ -1,15 +1,27 @@
 /*
- * partition.c — per-(partition, size_class) slab pools.
+ * partition.c — per-(partition, size_class) slab pools: carving, recycling,
+ * refill/flush, and reclaim.
  *
- * The per-thread cache (tcache.c) fronts these pools; this file owns the
- * locked slow path: pulling a batch of slots out of a slab to refill a cache
- * bin, and returning slots from a bin back to their home slabs on flush.
+ * Phase B adds lifetime cohorting: because call-site-grouped objects tend to
+ * die together, a pool's slabs drain in bursts. When a slab's free_count
+ * reaches nslots, no slot of it is outstanding anywhere (cached slots are not
+ * counted in free_count), so it is safe to reclaim under the pool lock. When
+ * an entire chunk drains, its pages are returned to the OS — the active chunk
+ * via MADV_DONTNEED+reset (no map/unmap thrash), older chunks via munmap.
  *
- * Lock order: pool->lock may be held while taking chunk_lock (inside
- * btm_slab_new) and registry_lock; never the reverse. No cycles.
+ * Lock order: pool->lock is held across carving and reclaim; chunk map/unmap
+ * take registry_lock internally. No cycles.
  */
 
 #include "internal.h"
+
+#include <string.h>
+
+static inline btm_chunk_t *chunk_of(const void *p) {
+    return (btm_chunk_t *)((uintptr_t)p & ~(BTM_CHUNK_SIZE - 1));
+}
+
+/* ---- partial list (doubly-linked via next/prev) ---- */
 
 static inline void partial_push(btm_scpool_t *pool, btm_slab_t *slab) {
     slab->prev = NULL;
@@ -27,6 +39,116 @@ static inline void partial_remove(btm_scpool_t *pool, btm_slab_t *slab) {
     slab->in_partial = 0;
 }
 
+/* ---- slab formatting ---- */
+
+static void slab_format(btm_slab_t *slab, btm_partition_t *part, int sc,
+                        unsigned npages) {
+    size_t slot = btm_sc_to_size[sc];
+    size_t hdr = (sizeof(btm_slab_t) + 15) & ~(size_t)15;
+    char  *data = (char *)slab + hdr;
+    size_t avail = (size_t)npages * BTM_PAGE_SIZE - hdr;
+    uint32_t nslots = (uint32_t)(avail / slot);
+
+    slab->magic = 0;
+    slab->part = part;
+    slab->sc = (uint16_t)sc;
+    slab->npages = (uint16_t)npages;
+    slab->nslots = nslots;
+    slab->free_count = nslots;
+    slab->next = slab->prev = NULL;
+    slab->in_partial = 0;
+
+    void *next = NULL;
+    for (uint32_t i = nslots; i-- > 0;) {
+        void *s = data + (size_t)i * slot;
+        *(void **)s = next;
+        next = s;
+    }
+    slab->free_head = next;
+}
+
+/* ---- slab allocation: recycle an empty slab or carve a new one ---- */
+
+btm_slab_t *btm_slab_new(btm_partition_t *part, int sc) {
+    btm_scpool_t *pool = &part->pools[sc];
+
+    /* Reuse a fully-free slab if one is cached (its pages are already
+     * committed — cheapest path). */
+    if (pool->empty) {
+        btm_slab_t *s = pool->empty;
+        pool->empty = s->next;
+        slab_format(s, part, sc, s->npages);
+        chunk_of(s)->live_slabs++;
+        return s;
+    }
+
+    unsigned npages = btm_sc_run_pages[sc];
+    if (!pool->active ||
+        pool->active->next_free_page + npages > BTM_PAGES_PER_CHUNK) {
+        btm_chunk_t *c = btm_chunk_map(pool);
+        if (!c) return NULL;
+        c->next = pool->chunks;
+        c->prev = NULL;
+        if (pool->chunks) pool->chunks->prev = c;
+        pool->chunks = c;
+        pool->active = c;
+    }
+
+    btm_chunk_t *c = pool->active;
+    uint32_t page = c->next_free_page;
+    c->next_free_page += npages;
+    for (uint32_t p = page; p < page + npages; p++)
+        c->page_owner[p] = (uint16_t)page;
+    c->live_slabs++;
+    pool->nslabs++;
+
+    btm_slab_t *slab = (btm_slab_t *)((char *)c + (size_t)page * BTM_PAGE_SIZE);
+    slab_format(slab, part, sc, npages);
+    return slab;
+}
+
+/* ---- reclaim ---- */
+
+static void chunk_unlink(btm_scpool_t *pool, btm_chunk_t *c) {
+    if (c->prev) c->prev->next = c->next;
+    else pool->chunks = c->next;
+    if (c->next) c->next->prev = c->prev;
+    c->next = c->prev = NULL;
+}
+
+/* Drop every cached empty slab that lives in chunk `c` from pool->empty. */
+static void purge_empties_of_chunk(btm_scpool_t *pool, btm_chunk_t *c) {
+    btm_slab_t **pp = &pool->empty;
+    while (*pp) {
+        if (chunk_of(*pp) == c) *pp = (*pp)->next;
+        else pp = &(*pp)->next;
+    }
+}
+
+/* Called when `slab` has just become fully free. Caller holds pool->lock. */
+static void slab_became_free(btm_scpool_t *pool, btm_slab_t *slab) {
+    partial_remove(pool, slab);
+    btm_chunk_t *c = chunk_of(slab);
+    c->live_slabs--;
+
+    if (c->live_slabs == 0) {
+        /* Whole chunk is free. Its other slabs (if any) sit in pool->empty. */
+        purge_empties_of_chunk(pool, c);
+        if (c == pool->active) {
+            btm_chunk_reset(c); /* keep one warm chunk; release its RSS */
+        } else {
+            chunk_unlink(pool, c);
+            btm_chunk_unmap(c);
+        }
+    } else {
+        /* Keep the slab around for cheap recycling (singly-linked). */
+        slab->next = pool->empty;
+        pool->empty = slab;
+    }
+}
+
+/* ---- refill / flush ---- */
+
 void *btm_pool_refill(btm_partition_t *part, int sc, btm_tls_bin_t *bin,
                       unsigned want) {
     btm_scpool_t *pool = &part->pools[sc];
@@ -34,13 +156,11 @@ void *btm_pool_refill(btm_partition_t *part, int sc, btm_tls_bin_t *bin,
 
     btm_slab_t *slab = pool->partial;
     if (!slab) {
-        slab = btm_slab_new(part, sc); /* takes chunk_lock; pool->chunk order */
+        slab = btm_slab_new(part, sc);
         if (!slab) { pthread_mutex_unlock(&pool->lock); return NULL; }
         partial_push(pool, slab);
-        pool->nslabs++;
     }
 
-    /* Detach up to `want` slots from the slab into a local chain. */
     void *local = NULL;
     unsigned n = 0;
     while (n < want && slab->free_head) {
@@ -56,7 +176,6 @@ void *btm_pool_refill(btm_partition_t *part, int sc, btm_tls_bin_t *bin,
 
     if (n == 0) return NULL;
 
-    /* Hand back one slot; splice the remaining (n-1) into the cache bin. */
     void *p = local;
     local = *(void **)local;
     n--;
@@ -73,8 +192,6 @@ void *btm_pool_refill(btm_partition_t *part, int sc, btm_tls_bin_t *bin,
 void btm_pool_flush(btm_tls_bin_t *bin, unsigned keep) {
     if (bin->count <= keep) return;
 
-    /* All slots in this bin share (partition, size_class) — recover the pool
-     * from the bin key (set when the bin was claimed). */
     unsigned k = bin->key - 1;
     unsigned pidx = k / BTM_NUM_SIZE_CLASSES;
     unsigned sc = k % BTM_NUM_SIZE_CLASSES;
@@ -86,13 +203,16 @@ void btm_pool_flush(btm_tls_bin_t *bin, unsigned keep) {
         bin->free_head = *(void **)s;
         bin->count--;
 
-        btm_chunk_t *c = (btm_chunk_t *)((uintptr_t)s & ~(BTM_CHUNK_SIZE - 1));
+        btm_chunk_t *c = chunk_of(s);
         btm_slab_t *slab = btm_slab_of(c, s);
         *(void **)s = slab->free_head;
         slab->free_head = s;
         slab->free_count++;
-        if (!slab->in_partial) partial_push(pool, slab);
-        /* Phase B will reclaim a slab here once free_count == nslots. */
+        if (slab->free_count == slab->nslots) {
+            slab_became_free(pool, slab);
+        } else if (!slab->in_partial) {
+            partial_push(pool, slab);
+        }
     }
     pthread_mutex_unlock(&pool->lock);
 }
@@ -103,6 +223,10 @@ void btm_pool_free_one(btm_slab_t *slab, void *ptr) {
     *(void **)ptr = slab->free_head;
     slab->free_head = ptr;
     slab->free_count++;
-    if (!slab->in_partial) partial_push(pool, slab);
+    if (slab->free_count == slab->nslots) {
+        slab_became_free(pool, slab);
+    } else if (!slab->in_partial) {
+        partial_push(pool, slab);
+    }
     pthread_mutex_unlock(&pool->lock);
 }

@@ -60,6 +60,31 @@ of which thread frees it, with no arena-ownership transfer. (Note: this bench
 is itself queue-bottlenecked, so the absolute Mops understate the allocator's
 headroom; the *relative* ordering is the signal.)
 
+## Phase B — lifetime cohorting + bulk reclaim
+
+Per-(partition, size_class) chunks; fully-free slabs recycled; whole drained
+chunks released (active chunk via MADV_DONTNEED+reset, others via munmap).
+
+### RSS over a grow → churn → shrink → drain workload (MB, lower better)
+
+`bench_rss 200000 3000000`, single call site (→ one partition):
+
+| alloc    | peak | shrunk | steady | drained |
+|----------|------|--------|--------|---------|
+| glibc    | 182  | 191    | 190    | 187     |
+| jemalloc | 187  | 203    | 203    | 203     |
+| btmalloc | 184  | 248    | 184    | **148** |
+
+**btmalloc returns the most memory on drain** (148 vs 187 vs 203) — glibc and
+jemalloc essentially never give it back. Hot path (churn) and the
+producer/consumer win are unchanged from Phase A.
+
+Limitation (motivates Phase D): reclaim is whole-chunk, so a single bin-cached
+slot pins its slab, and one pinned slab pins its entire 2 MiB chunk. Under
+random churn this leaves chunks partially live (the mid-shrink 248 MB spike and
+the 148 MB residual). Phase D compaction consolidates sparse slabs so chunks
+can fully drain.
+
 ## Takeaways for next phases
 
 - **Win to defend:** cross-thread free / producer-consumer scaling.

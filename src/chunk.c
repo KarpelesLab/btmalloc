@@ -79,17 +79,14 @@ void btm_registry_remove(uintptr_t base, size_t len) {
     atomic_fetch_add_explicit(&btm_registry_gen, 1, memory_order_release);
 }
 
-/* ---------------- chunk allocation ---------------- */
-
-static pthread_mutex_t chunk_lock = PTHREAD_MUTEX_INITIALIZER;
-static btm_chunk_t    *active_chunk;  /* current chunk being carved */
-static btm_chunk_t    *chunk_list;    /* all chunks (for teardown/debug) */
+/* ---------------- chunk map / unmap / reset ---------------- */
 
 void btm_chunk_init(void) { /* radix_l1 + locks are static-initialized */ }
 
-/* Map one 2 MiB, 2 MiB-aligned chunk (over-map then trim slack). Must be
- * called with chunk_lock held. */
-static btm_chunk_t *chunk_map_locked(void) {
+/* First page available for slabs (page 0 is the chunk header). */
+#define BTM_FIRST_DATA_PAGE 1
+
+btm_chunk_t *btm_chunk_map(btm_scpool_t *pool) {
     size_t want = BTM_CHUNK_SIZE * 2;
     void *raw = mmap(NULL, want, PROT_READ | PROT_WRITE,
                      MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
@@ -103,67 +100,33 @@ static btm_chunk_t *chunk_map_locked(void) {
 
     btm_chunk_t *c = (btm_chunk_t *)base;
     c->magic = BTM_CHUNK_MAGIC;
-    c->next_free_page = 1; /* page 0 is the header */
-    c->_pad = 0;
+    c->pool = pool;
+    c->next = c->prev = NULL;
+    c->next_free_page = BTM_FIRST_DATA_PAGE;
+    c->live_slabs = 0;
     for (unsigned i = 0; i < BTM_PAGES_PER_CHUNK; i++)
         c->page_owner[i] = BTM_PAGE_NONE;
 
     /* Hint the kernel to back this chunk with a 2 MiB huge page. */
     madvise((void *)base, BTM_CHUNK_SIZE, MADV_HUGEPAGE);
 
-    c->next = chunk_list;
-    chunk_list = c;
     btm_registry_insert(base, BTM_CHUNK_SIZE, base);
     return c;
 }
 
-/* ---------------- slab carving ---------------- */
-
-static void slab_format(btm_slab_t *slab, btm_partition_t *part, int sc,
-                        unsigned npages) {
-    size_t slot = btm_sc_to_size[sc];
-    size_t hdr = (sizeof(btm_slab_t) + 15) & ~(size_t)15;
-    char  *data = (char *)slab + hdr;
-    size_t avail = (size_t)npages * BTM_PAGE_SIZE - hdr;
-    uint32_t nslots = (uint32_t)(avail / slot);
-
-    slab->magic = 0;
-    slab->part = part;
-    slab->sc = (uint16_t)sc;
-    slab->npages = (uint16_t)npages;
-    slab->nslots = nslots;
-    slab->free_count = nslots;
-    slab->next = slab->prev = NULL;
-    slab->in_partial = 0;
-
-    /* Thread all slots into the freelist, lowest address first on top. */
-    void *next = NULL;
-    for (uint32_t i = nslots; i-- > 0;) {
-        void *s = data + (size_t)i * slot;
-        *(void **)s = next;
-        next = s;
-    }
-    slab->free_head = next;
+void btm_chunk_unmap(btm_chunk_t *c) {
+    btm_registry_remove((uintptr_t)c, BTM_CHUNK_SIZE);
+    munmap(c, BTM_CHUNK_SIZE);
 }
 
-btm_slab_t *btm_slab_new(btm_partition_t *part, int sc) {
-    unsigned npages = btm_sc_run_pages[sc];
-
-    pthread_mutex_lock(&chunk_lock);
-    if (!active_chunk ||
-        active_chunk->next_free_page + npages > BTM_PAGES_PER_CHUNK) {
-        btm_chunk_t *c = chunk_map_locked();
-        if (!c) { pthread_mutex_unlock(&chunk_lock); return NULL; }
-        active_chunk = c;
-    }
-    btm_chunk_t *c = active_chunk;
-    uint32_t page = c->next_free_page;
-    c->next_free_page += npages;
-    for (uint32_t p = page; p < page + npages; p++)
-        c->page_owner[p] = (uint16_t)page;
-    pthread_mutex_unlock(&chunk_lock);
-
-    btm_slab_t *slab = (btm_slab_t *)((char *)c + (size_t)page * BTM_PAGE_SIZE);
-    slab_format(slab, part, sc, npages);
-    return slab;
+void btm_chunk_reset(btm_chunk_t *c) {
+    /* Drop physical pages back to the OS (RSS falls) but keep the chunk mapped
+     * and registered so it can be re-carved without another mmap/registry
+     * round-trip. The header page (0) is preserved. */
+    madvise((char *)c + BTM_PAGE_SIZE, BTM_CHUNK_SIZE - BTM_PAGE_SIZE,
+            MADV_DONTNEED);
+    c->next_free_page = BTM_FIRST_DATA_PAGE;
+    c->live_slabs = 0;
+    for (unsigned i = BTM_FIRST_DATA_PAGE; i < BTM_PAGES_PER_CHUNK; i++)
+        c->page_owner[i] = BTM_PAGE_NONE;
 }

@@ -29,7 +29,8 @@ struct slot { void *p; size_t sz; };
 static void sample(const char *phase, long opc, long live_bytes) {
     long rss = bench_rss_bytes();
     char param[64];
-    snprintf(param, sizeof param, "phase=%s,ops=%ld", phase, opc);
+    /* No comma — it would split the CSV's param column. */
+    snprintf(param, sizeof param, "%s@%ld", phase, opc);
     bench_emit("rss", param, "rss_bytes", (double)rss);
     bench_emit("rss", param, "live_bytes", (double)live_bytes);
     if (live_bytes > 0)

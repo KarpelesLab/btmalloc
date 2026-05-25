@@ -49,14 +49,20 @@ typedef struct btm_partition btm_partition_t;
 struct btm_slab;
 typedef struct btm_slab btm_slab_t;
 
+struct btm_scpool;
+typedef struct btm_scpool btm_scpool_t;
+
 /* ---- Chunk: a 2 MiB, 2 MiB-aligned region hosting small-object slabs ----
  * Page 0 is the header. Pages 1..511 carry slabs. page_owner[p] gives the page
- * index of the slab header owning page p (or BTM_PAGE_NONE). */
+ * index of the slab header owning page p (or BTM_PAGE_NONE). Each chunk belongs
+ * to exactly one (partition, size_class) pool, so a chunk drains and is
+ * reclaimed as a unit when the call sites feeding that pool stop allocating. */
 typedef struct btm_chunk {
     uint64_t          magic;          /* BTM_CHUNK_MAGIC */
-    struct btm_chunk *next;           /* global chunk list */
+    btm_scpool_t     *pool;           /* owning pool */
+    struct btm_chunk *next, *prev;    /* pool's chunk list */
     uint32_t          next_free_page; /* bump pointer for slab carving */
-    uint32_t          _pad;
+    uint32_t          live_slabs;     /* carved slabs not yet fully freed */
     uint16_t          page_owner[BTM_PAGES_PER_CHUNK];
 } btm_chunk_t;
 
@@ -79,12 +85,19 @@ struct btm_slab {
     uint8_t          _pad[3];
 };
 
-/* ---- Size-class pool: per (partition, size_class) ---- */
-typedef struct btm_scpool {
+/* ---- Size-class pool: per (partition, size_class) ----
+ * Owns its own chunks so a pool's memory can be released wholesale when its
+ * call sites go quiet. `partial` holds slabs with free slots in use; `empty`
+ * holds fully-free slabs kept for cheap recycling; `active` is the chunk being
+ * carved. */
+struct btm_scpool {
     pthread_mutex_t lock;
-    btm_slab_t     *partial;   /* slabs with free_count > 0 */
+    btm_slab_t     *partial;   /* doubly-linked, free_count in (0, nslots) */
+    btm_slab_t     *empty;     /* singly-linked via ->next, free_count==nslots */
+    btm_chunk_t    *chunks;    /* doubly-linked list of this pool's chunks */
+    btm_chunk_t    *active;    /* current carving chunk (never unmapped) */
     uint64_t        nslabs;
-} btm_scpool_t;
+};
 
 struct btm_partition {
     btm_scpool_t pools[BTM_NUM_SIZE_CLASSES];
@@ -146,11 +159,16 @@ static inline unsigned btm_cache_max(int sc) {
     return m;
 }
 
-/* ---- chunk.c: backing store + pointer registry + slab carving ---- */
+/* ---- chunk.c: backing store + pointer registry ---- */
 extern _Atomic(uint64_t) btm_registry_gen BTM_HIDDEN; /* bumped on any removal */
 void        btm_chunk_init(void) BTM_HIDDEN;
-/* Carve a fresh slab for (part, sc) from the global chunk pool. */
-btm_slab_t *btm_slab_new(btm_partition_t *part, int sc) BTM_HIDDEN;
+/* Map a fresh 2 MiB chunk owned by `pool` (registered, header initialized). */
+btm_chunk_t *btm_chunk_map(btm_scpool_t *pool) BTM_HIDDEN;
+/* Unregister and unmap a fully-drained chunk. */
+void        btm_chunk_unmap(btm_chunk_t *c) BTM_HIDDEN;
+/* Release a drained chunk's physical pages (MADV_DONTNEED) and reset it for
+ * reuse, keeping it mapped and registered. */
+void        btm_chunk_reset(btm_chunk_t *c) BTM_HIDDEN;
 /* Resolve a user pointer to its owning header base, or 0 if foreign.
  * The returned address begins with a magic word (CHUNK or LARGE). */
 uintptr_t   btm_registry_lookup(const void *ptr) BTM_HIDDEN;
@@ -179,7 +197,9 @@ static inline btm_slab_t *btm_slab_of(btm_chunk_t *c, const void *ptr) {
     return (btm_slab_t *)((char *)c + (size_t)owner * BTM_PAGE_SIZE);
 }
 
-/* ---- partition.c: pool refill/flush under lock ---- */
+/* ---- partition.c: slab pools, carving, refill/flush, reclaim ---- */
+/* Carve or recycle a slab for (part, sc). Caller holds pool->lock. */
+btm_slab_t *btm_slab_new(btm_partition_t *part, int sc) BTM_HIDDEN;
 /* Refill `bin` from (part, sc): returns one slot, caches up to `want`-1 more. */
 void *btm_pool_refill(btm_partition_t *part, int sc, btm_tls_bin_t *bin,
                       unsigned want) BTM_HIDDEN;

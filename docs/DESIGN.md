@@ -171,7 +171,10 @@ measured delta, not a guess.
   (shadow-map stress + ASan clean); competitive throughput; **wins
   producer/consumer cross-thread-free at every thread count** (see
   bench/RESULTS.md). Open: small-object single-thread fast path trails jemalloc.
-- **Phase B** — lifetime cohorting + bulk slab reclaim.
+- **Phase B** ✔ — per-pool chunks, slab recycling, whole-chunk reclaim
+  (active chunk MADV_DONTNEED+reset, others munmap). Returns more memory to the
+  OS on drain than glibc/jemalloc (bench/RESULTS.md). Open: whole-chunk reclaim
+  is pinned by single cached slots — Phase D compaction addresses this.
 - **Phase C** — async backing-store via io_uring.
 - **Phase D** — hotness tracking + tiering + compaction.
 - **Phase E** — adaptive size classes + LD_PRELOAD hardening.
