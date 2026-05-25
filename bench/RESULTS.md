@@ -357,6 +357,28 @@ reclaims 4.2 MB on top. Meshing's absolute win is still workload-dependent (it
 needs disjoint sparse pairs), but it is no longer paid for with overhead.
 Fork-unsafe (MAP_SHARED, MADV_DONTFORK'd); see DESIGN.
 
+## Phase J — live-data cold tiering (btm_pageout_cold)
+
+Attacks "hotness fragmentation" (HADES/OBASE 2025-26: cold-but-live data pins
+DRAM). Each slab carries an activity epoch stamped on allocator activity (slow
+paths only — zero hot-path cost). `btm_pageout_cold()` evicts the data pages of
+*settled* slabs — full, and untouched since the previous call — to swap with
+`MADV_PAGEOUT`. Objects stay valid and fault back transparently on next access;
+the allocator-activity epoch is the coldness proxy, and the per-partition
+structure means a quiet call site's whole cohort ages out together.
+
+### Demonstration (60 MB cold dataset + a churning hot set)
+
+| | RSS |
+|---|---|
+| before `btm_pageout_cold()` | 63.6 MB |
+| after  | **4.0 MB** |
+
+A **94% resident drop** — cold live data evicted to swap — with all 120k cold
+objects verified byte-intact afterward (they fault back) and the hot set
+untouched. Works in default and mesh modes; requires swap to reduce RSS (the
+mechanism + safety hold regardless). No throughput regression (churn ~6.7 ns).
+
 ## Takeaways
 
 - **Win to defend:** cross-thread free / producer-consumer scaling.

@@ -114,7 +114,8 @@ struct btm_slab {
     uint8_t          in_partial;  /* on the pool's partial list? */
     uint8_t          decommitted; /* data pages released to the OS? */
     uint8_t          retired;     /* meshed: no new allocations */
-    uint8_t          _pad;
+    uint8_t          paged_out;   /* data pages evicted to swap (cold tiering) */
+    uint32_t         epoch;       /* tier epoch at last allocator activity */
 };
 
 /* Number of metadata pages per chunk: page 0 (chunk header) + the descriptor
@@ -184,6 +185,7 @@ extern unsigned         btm_nparts BTM_HIDDEN;          /* power of two */
 extern _Atomic(int)     btm_ready BTM_HIDDEN;
 extern int              btm_intern_mode BTM_HIDDEN;     /* 1 = deterministic */
 extern int              btm_mesh_mode BTM_HIDDEN;       /* 1 = memfd-backed + compaction */
+extern _Atomic(uint32_t) btm_tier_epoch BTM_HIDDEN;     /* advanced by btm_pageout_cold */
 void                    btm_ensure_init(void) BTM_HIDDEN;
 /* Deterministic call-site -> partition interning (BTM_PARTITION_MODE=intern):
  * each distinct return address gets its own partition until P is exhausted.

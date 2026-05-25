@@ -104,6 +104,17 @@ void btm_heap_profile(int fd);
 BTM_API
 size_t btm_compact(void);
 
+/* Cold-data tiering: evict the pages of "settled" allocations — slabs that are
+ * full and have seen no allocation/free activity since the previous call — to
+ * swap (MADV_PAGEOUT), reducing the resident footprint of long-lived but cold
+ * data. The objects stay valid and fault back transparently on next access (at
+ * the cost of a page fault + swap-in). Returns the number of bytes hinted for
+ * eviction. Intended to be called when entering an idle period; safe to call
+ * any time (mislabeled-hot pages simply fault back). Requires swap to actually
+ * reduce RSS. Works in any mode. */
+BTM_API
+size_t btm_pageout_cold(void);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

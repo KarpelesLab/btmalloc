@@ -33,6 +33,7 @@ int              btm_intern_mode;
 int              btm_mesh_mode;
 int              btm_harden_mode; /* BTM_HARDEN=1: double-free detection */
 uintptr_t        btm_fl_key;      /* freelist safe-linking secret */
+_Atomic(uint32_t) btm_tier_epoch; /* advanced by btm_pageout_cold */
 
 static pthread_once_t btm_init_once = PTHREAD_ONCE_INIT;
 

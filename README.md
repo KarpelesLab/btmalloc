@@ -20,6 +20,9 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full rationale and
   the others keep.
 - **2× faster than jemalloc** on repeated grow/free cycles — a warm-chunk pool
   eliminates mmap/munmap thrash.
+- **Live-data cold tiering** (`btm_pageout_cold()`): evicts cold-but-live data
+  to swap (94% RSS drop in the demo); objects fault back transparently. Attacks
+  the "hotness fragmentation" problem from recent (2025-26) research.
 - Drop-in via `LD_PRELOAD`: runs python, git, gcc, perl, bash, and parallel
   builds cleanly.
 - **Security**: freelist safe-linking (obfuscated free-pointers) always on;

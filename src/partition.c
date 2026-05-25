@@ -26,6 +26,13 @@ static inline btm_chunk_t *chunk_of(const void *p) {
     return (btm_chunk_t *)((uintptr_t)p & ~(BTM_CHUNK_SIZE - 1));
 }
 
+/* Mark a slab as having had recent allocator activity (for cold tiering). If it
+ * had been paged out, a touch implies its pages are faulting back in. */
+static inline void slab_touch(btm_slab_t *slab) {
+    slab->epoch = atomic_load_explicit(&btm_tier_epoch, memory_order_relaxed);
+    slab->paged_out = 0;
+}
+
 /* Release an empty slab's data pages to the OS. With out-of-line descriptors
  * the data region is pure slot pages, so this now works for every class
  * (including single-page slabs). */
@@ -68,6 +75,8 @@ static void slab_format(btm_slab_t *slab, btm_partition_t *part, int sc) {
     slab->in_partial = 0;
     slab->retired = 0;
     slab->decommitted = 0;
+    slab->paged_out = 0;
+    slab->epoch = atomic_load_explicit(&btm_tier_epoch, memory_order_relaxed);
 
     /* The data region is npages pure slot-only pages (no inline header). */
     char *data = btm_slab_data(slab);
@@ -214,6 +223,7 @@ void *btm_pool_refill(btm_partition_t *part, int sc, btm_tls_bin_t *bin,
     }
     slab->free_count -= n;
     pool->outstanding += n; /* these slots leave the pool (cache or in use) */
+    slab_touch(slab);
     if (slab->free_count == 0) partial_remove(pool, slab);
     pthread_mutex_unlock(&pool->lock);
 
@@ -248,6 +258,7 @@ void btm_pool_flush(btm_tls_bin_t *bin, unsigned keep) {
         btm_fl_set(s, slab->free_head);
         slab->free_head = s;
         slab->free_count++;
+        slab_touch(slab);
         if (slab->retired) {
             /* Meshed slab: inert — track frees but never reallocate/reclaim. */
         } else if (slab->free_count == slab->nslots) {
@@ -370,12 +381,53 @@ size_t btm_compact(void) {
     return reclaimed;
 }
 
+/* ---- cold-data tiering ---- *
+ *
+ * Evict the data pages of "settled" slabs — full (no free slots) and not
+ * touched by the allocator since the previous call — to swap via MADV_PAGEOUT.
+ * Their objects fault back transparently on next access. This attacks "hotness
+ * fragmentation" (cold-but-live data pinning DRAM): the allocator-activity
+ * epoch is a proxy for coldness, and full+idle slabs are where long-lived data
+ * settles. The caller decides cadence (e.g. on entering an idle period). */
+size_t btm_pageout_cold(void) {
+    if (!atomic_load_explicit(&btm_ready, memory_order_acquire)) return 0;
+    uint32_t g = atomic_load_explicit(&btm_tier_epoch, memory_order_relaxed);
+    size_t total = 0;
+
+    for (unsigned p = 0; p < btm_nparts; p++) {
+        for (int sc = 0; sc < BTM_NUM_SIZE_CLASSES; sc++) {
+            btm_scpool_t *pool = &btm_partitions[p].pools[sc];
+            pthread_mutex_lock(&pool->lock);
+            for (btm_chunk_t *c = pool->chunks; c; c = c->next) {
+                uint32_t page = BTM_DATA_START_PAGE;
+                while (page < c->next_free_page) {
+                    btm_slab_t *s = &btm_chunk_descs(c)[page];
+                    uint32_t np = s->npages ? s->npages : 1;
+                    if (s->free_count == 0 && !s->retired && !s->paged_out &&
+                        s->epoch < g) {
+                        size_t len = (size_t)np * BTM_PAGE_SIZE;
+                        madvise(btm_slab_data(s), len, MADV_PAGEOUT);
+                        s->paged_out = 1;
+                        total += len;
+                    }
+                    page += np;
+                }
+            }
+            pthread_mutex_unlock(&pool->lock);
+        }
+    }
+    /* Advance the epoch so slabs touched before now count as idle next time. */
+    atomic_fetch_add_explicit(&btm_tier_epoch, 1, memory_order_relaxed);
+    return total;
+}
+
 void btm_pool_free_one(btm_slab_t *slab, void *ptr) {
     btm_scpool_t *pool = &btm_partitions[slab->part_idx].pools[slab->sc];
     pthread_mutex_lock(&pool->lock);
     btm_fl_set(ptr, slab->free_head);
     slab->free_head = ptr;
     slab->free_count++;
+    slab_touch(slab);
     if (pool->outstanding) pool->outstanding--;
     if (slab->retired) {
         /* Meshed slab: inert. */
