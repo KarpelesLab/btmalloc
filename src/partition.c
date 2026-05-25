@@ -67,6 +67,7 @@ static void slab_format(btm_slab_t *slab, btm_partition_t *part, int sc,
 
     slab->magic = 0;
     slab->part = part;
+    slab->part_idx = (uint16_t)(part - btm_partitions);
     slab->sc = (uint16_t)sc;
     slab->npages = (uint16_t)npages;
     slab->nslots = nslots;
@@ -229,11 +230,7 @@ void *btm_pool_refill(btm_partition_t *part, int sc, btm_tls_bin_t *bin,
 void btm_pool_flush(btm_tls_bin_t *bin, unsigned keep) {
     if (bin->count <= keep) return;
 
-    unsigned k = bin->key - 1;
-    unsigned pidx = k / BTM_NUM_SIZE_CLASSES;
-    unsigned sc = k % BTM_NUM_SIZE_CLASSES;
-    btm_scpool_t *pool = &btm_partitions[pidx].pools[sc];
-
+    btm_scpool_t *pool = bin->pool;
     pthread_mutex_lock(&pool->lock);
     while (bin->count > keep) {
         void *s = bin->free_head;

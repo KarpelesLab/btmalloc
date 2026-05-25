@@ -100,8 +100,7 @@ void *btm_malloc_at(size_t size, void *ra) {
     }
 
     unsigned part = btm_partition_of(ra);
-    unsigned key = part * BTM_NUM_SIZE_CLASSES + (unsigned)sc + 1u;
-    btm_tls_bin_t *bin = btm_tls_bin_for(t, key);
+    btm_tls_bin_t *bin = btm_tls_bin_at(t, part, sc);
 
     void *p = bin->free_head;
     if (BTM_LIKELY(p != NULL)) {
@@ -110,6 +109,7 @@ void *btm_malloc_at(size_t size, void *ra) {
         return p;
     }
 
+    bin->pool = &btm_partitions[part].pools[sc]; /* ensure flush can find it */
     unsigned want = btm_cache_max(sc) / 2;
     if (want < 1) want = 1;
     return btm_pool_refill(&btm_partitions[part], sc, bin, want);
@@ -130,14 +130,14 @@ void btm_free(void *ptr) {
         btm_chunk_t *c = (btm_chunk_t *)owner;
         btm_slab_t *slab = btm_slab_of(c, ptr);
         int sc = slab->sc;
-        unsigned pidx = (unsigned)(slab->part - btm_partitions);
-        unsigned key = pidx * BTM_NUM_SIZE_CLASSES + (unsigned)sc + 1u;
+        unsigned pidx = slab->part_idx; /* no pointer-division per free */
 
         if (BTM_UNLIKELY(t == NULL)) {
             t = btm_tls_get();
             if (!t) { btm_pool_free_one(slab, ptr); return; }
         }
-        btm_tls_bin_t *bin = btm_tls_bin_for(t, key);
+        btm_tls_bin_t *bin = btm_tls_bin_at(t, pidx, sc);
+        bin->pool = c->pool; /* the chunk's pool is exactly (pidx, sc)'s pool */
         *(void **)ptr = bin->free_head;
         bin->free_head = ptr;
         bin->count++;

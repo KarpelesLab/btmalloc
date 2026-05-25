@@ -20,17 +20,25 @@ _Thread_local btm_tls_t *btm_tls;
 static pthread_key_t  btm_tls_key;
 static pthread_once_t btm_tls_key_once = PTHREAD_ONCE_INIT;
 
-/* Flush every cached bin back to its home pool, then unmap. Runs at thread
+/* Total bytes for a per-thread cache: header + one bin per (partition, sc).
+ * The array is large but mmap-lazy, so untouched bins never fault in. */
+static size_t btm_tls_bytes(void) {
+    return sizeof(btm_tls_t) +
+           (size_t)btm_nparts * BTM_NUM_SIZE_CLASSES * sizeof(btm_tls_bin_t);
+}
+
+/* Flush every populated bin back to its home pool, then unmap. Runs at thread
  * exit while btm_partitions is still valid. */
 static void btm_tls_destroy(void *p) {
     btm_tls_t *t = p;
     if (!t) return;
     btm_tls = NULL; /* the thread is leaving; don't let stale ptr be reused */
-    for (unsigned i = 0; i < BTM_TLS_BINS; i++) {
-        if (t->bins[i].key && t->bins[i].count)
+    unsigned nbins = btm_nparts * BTM_NUM_SIZE_CLASSES;
+    for (unsigned i = 0; i < nbins; i++) {
+        if (t->bins[i].count && t->bins[i].pool)
             btm_pool_flush(&t->bins[i], 0);
     }
-    munmap(t, sizeof(*t));
+    munmap(t, btm_tls_bytes());
 }
 
 static void btm_tls_make_key(void) {
@@ -42,12 +50,10 @@ btm_tls_t *btm_tls_get(void) {
     if (BTM_LIKELY(t != NULL)) return t;
 
     pthread_once(&btm_tls_key_once, btm_tls_make_key);
-    t = mmap(NULL, sizeof(*t), PROT_READ | PROT_WRITE,
+    t = mmap(NULL, btm_tls_bytes(), PROT_READ | PROT_WRITE,
              MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (t == MAP_FAILED) return NULL; /* mmap zeroes: all bins start empty */
     btm_tls = t;
     pthread_setspecific(btm_tls_key, t);
     return t;
 }
-
-/* btm_tls_bin_for is defined static inline in internal.h (hot path). */

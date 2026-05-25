@@ -81,9 +81,9 @@ struct btm_slab {
     uint32_t         free_count;  /* slots currently in free_head */
     uint16_t         sc;          /* size class index */
     uint16_t         npages;      /* pages spanned */
+    uint16_t         part_idx;    /* owning partition index (for bin lookup) */
     uint8_t          in_partial;  /* on the pool's partial list? */
     uint8_t          decommitted; /* data pages released via MADV_DONTNEED? */
-    uint8_t          _pad[2];
 };
 
 /* ---- Size-class pool: per (partition, size_class) ----
@@ -107,14 +107,17 @@ struct btm_partition {
 };
 
 /* ---- Per-thread cache ----
- * Direct-mapped cache of bins, each keyed by (partition, size_class). A miss
- * evicts the resident bin (flushing its slots back to their home pool) and
- * claims the slot for the new key. */
-#define BTM_TLS_BINS 512  /* power of two */
+ * A dense, directly-indexed array of bins: bin = bins[partition * NUM_SC + sc].
+ * No hashing, no eviction — the index *is* the key. The array spans every
+ * (partition, size_class), but it is mmap'd, so bins a thread never touches
+ * never fault in and cost no memory. Each bin records its owning pool so a
+ * flush (including the cross-thread case) can return slots without recomputing
+ * anything. */
 typedef struct btm_tls_bin {
-    uint32_t key;        /* part * NUM_SIZE_CLASSES + sc, +1 (0 = empty) */
-    uint32_t count;      /* slots in free_head */
-    void    *free_head;  /* cached freelist */
+    void         *free_head; /* cached freelist */
+    btm_scpool_t *pool;      /* owning pool, set on first use */
+    uint32_t      count;     /* slots in free_head */
+    uint32_t      _pad;
 } btm_tls_bin_t;
 
 /* Per-thread region cache: maps a 2 MiB region -> its owning header, so the
@@ -130,8 +133,8 @@ typedef struct btm_rcache_ent {
 } btm_rcache_ent_t;
 
 typedef struct btm_tls {
-    btm_tls_bin_t    bins[BTM_TLS_BINS];
     btm_rcache_ent_t rcache[BTM_RCACHE];
+    btm_tls_bin_t    bins[]; /* btm_nparts * BTM_NUM_SIZE_CLASSES entries */
 } btm_tls_t;
 
 /* ---- Globals (defined in btmalloc.c) ---- */
@@ -218,18 +221,10 @@ void  btm_pool_free_one(btm_slab_t *slab, void *ptr) BTM_HIDDEN;
 extern _Thread_local btm_tls_t *btm_tls;          /* NULL until first use */
 btm_tls_t     *btm_tls_get(void) BTM_HIDDEN;      /* lazily create per-thread */
 
-/* Find (or claim) the cache bin for `key`. Direct-mapped; a key miss evicts
- * the resident bin (flushing its slots home) and re-keys the slot. Inlined
- * into the hot path. */
-static inline btm_tls_bin_t *btm_tls_bin_for(btm_tls_t *t, unsigned key) {
-    unsigned h = (key * 2654435761u) & (BTM_TLS_BINS - 1);
-    btm_tls_bin_t *bin = &t->bins[h];
-    if (BTM_LIKELY(bin->key == key)) return bin;
-    if (bin->key && bin->count) btm_pool_flush(bin, 0);
-    bin->key = key;
-    bin->count = 0;
-    bin->free_head = NULL;
-    return bin;
+/* Dense bin lookup: the index is the key, so this is a pointer add. */
+static inline btm_tls_bin_t *btm_tls_bin_at(btm_tls_t *t, unsigned part,
+                                            int sc) {
+    return &t->bins[part * BTM_NUM_SIZE_CLASSES + (unsigned)sc];
 }
 
 /* ---- large.c ---- */

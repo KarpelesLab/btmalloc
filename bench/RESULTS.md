@@ -174,6 +174,24 @@ not justified while the design's headline wins (cross-thread free, RSS) are
 already demonstrated. True object-moving compaction (Mesh-style, memfd-backed)
 and live-data MADV_COLD tiering (access sampling) likewise remain future work.
 
+## Phase F — hot-path simplification (dense bin cache)
+
+Replaced the hashed, eviction-based per-thread bin cache with a dense array
+indexed directly by `partition * NUM_SC + size_class` (mmap'd, so untouched
+bins never fault in — RSS is unchanged). Stored the partition index in the slab
+to drop a per-free pointer-subtraction-by-non-power-of-two (a hidden
+reciprocal-multiply), and resolve a freed slot's pool via `chunk->pool`
+directly.
+
+Effect: tight-churn throughput is unchanged (~6.8 ns) — the remaining gap to
+jemalloc (~2.2 ns) is **fixed per-op overhead from header-free pointer
+resolution** in `free` (several dependent metadata loads), structural to a
+design that stores no per-object header. The win is for real programs with
+many call sites: the old hashed cache could thrash (evict + re-flush) once the
+active `(partition, size_class)` set exceeded the table or collided; the dense
+array never evicts. The code is also simpler (no hashing, no eviction, no
+key bookkeeping).
+
 ## Takeaways
 
 - **Win to defend:** cross-thread free / producer-consumer scaling.
