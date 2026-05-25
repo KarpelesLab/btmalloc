@@ -212,20 +212,43 @@ single hotspot. Turning each suspect off (64 B churn, best-of-5 ns/op):
 
 | config | ns/op | vs default |
 | --- | --- | --- |
-| default (partitioning + hardening, rcache resolve) | 6.54 | — |
-| hardening off (`BTM_HARDENING=OFF`) | 6.30 | −0.24 (≈4 %) |
-| partitioning off (`BTM_PARTITIONING=OFF`) | 6.10 | −0.44 (≈7 %) |
-| free resolve: trusting masked-magic (`BTM_TRUST_FREE=1`, prototype) | 6.31 | −0.23 |
-| partitioning off **and** trust-free | **3.99** | −2.55 (≈39 %) |
+| default (partitioning + hardening, rcache resolve) | 6.55 | — |
+| hardening off (`BTM_HARDENING=OFF`) | 6.30 | −0.25 (≈4 %) |
+| partitioning off (`BTM_PARTITIONING=OFF`) | 5.76 | −0.79 (≈12 %) |
+| owner-resolve: rcache gen-load relaxed (not acquire) | 6.53 | ≈0 |
+| owner-resolve: trusting masked-magic (prototype) | 6.37 | −0.18 |
+| partitioning off **and** trust-free | **4.07** | −2.48 (≈38 %) |
 
-Two lessons. (1) No single feature is the gap — hardening, the return-address
-hash, and the owner-resolve each cost only a few percent. (2) The last row is
-strongly **non-additive**: removing the hash *and* the atomic acquire-load in
-`btm_resolve_owner` together unlocks ~2.5 ns the two can't individually,
-because both act as compiler reordering barriers — once gone, the tight
-alloc-then-free-same-slot loop collapses. That 3.99 ns therefore overstates the
-real-world floor (production code separates alloc and free), but flags the
-atomic acquire-load as the next lever to investigate.
+Three lessons, two of them from chasing dead ends rather than guessing:
+
+1. **No single feature is the gap.** Hardening, the return-address hash, and the
+   owner-resolve each cost only a few percent on their own.
+
+2. **The atomic acquire-load is *not* a barrier worth removing — measured, not
+   assumed.** A first guess was that `memory_order_acquire` on `btm_registry_gen`
+   was a compiler reordering barrier throttling the free path. Relaxing it to a
+   monotonic load with an acquire fence only on the (cold) miss path changed
+   churn by <1 % (6.55→6.53). On x86 the acquire-load was already a plain MOV;
+   the reordering freedom bought nothing here. Reverted.
+
+3. **The owner-resolve cost is real but not removable for a drop-in.** The
+   "partitioning off + trust-free" 4.07 ns row is strongly non-additive (trust
+   alone, partitioning on, only saved 0.18 ns). callgrind shows trust-free cuts
+   ~16 instr/op (101→85) yet wall-clock drops ~30 %, so the win is shortening
+   free's *dependent-load chain* (the rcache walk chases the global gen counter,
+   the rcache entry, and the chunk header — three cache lines; trust-free touches
+   only the chunk header), and it only surfaces with partitioning off because
+   out-of-order execution otherwise hides free's latency behind the malloc hash.
+   **But trust-free is unsafe as an LD_PRELOAD drop-in:** masking a pointer to
+   its 2 MiB base and dereferencing the magic faults on foreign frees, which real
+   programs do — it segfaulted `ls` ~45 % of runs. The registry/rcache is exactly
+   the fault-free "is this ours?" guard that prevents that; its load chain is the
+   price of safe foreign-free handling, not removable overhead. The prototype was
+   measured and discarded. (mimalloc can mask-and-trust only because it keeps a
+   separate fault-free region bitmap; btmalloc's chunks are scattered 2 MiB
+   mmaps, so the registry *is* that structure.) 4.07 ns is therefore not a
+   reachable floor for the drop-in — and it also overstates even an explicit-API
+   floor, since the tight alloc-then-free-same-slot loop is unusually friendly.
 
 Crucially, **every microbenchmark here allocates from a single call site**, so
 all objects land in one partition whether or not partitioning is compiled in —
