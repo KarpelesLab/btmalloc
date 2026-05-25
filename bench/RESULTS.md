@@ -211,6 +211,36 @@ Conclusion: the small-object single-thread gap is a small constant, not an
 algorithmic one, and it is amortized in real workloads that do actual work per
 allocation. Not worth trading the design's wins to chase further.
 
+## Partition sweep on a real workload (peak RSS vs P)
+
+`bench/sweep_partitions.sh` — a multi-call-site python workload (dicts, lists,
+strings, JSON; held working set with churn), peak RSS via `getrusage`:
+
+| config        | peak RSS | wall  |
+|---------------|----------|-------|
+| glibc         | 356.7 MB | 5.93s |
+| btmalloc P=1  | 372.3 MB | 6.28s |
+| btmalloc P=8  | 374.5 MB | 6.25s |
+| btmalloc P=64 | 375.8 MB | 6.22s |
+| btmalloc P=256| 376.5 MB | 6.24s |
+| btmalloc P=1024| 378.3 MB | 6.27s |
+
+Honest reading:
+
+- **btmalloc's RSS advantage is on reclamation, not peak.** On a workload that
+  *holds* a working set, btmalloc is ~5% heavier than glibc (per-partition
+  minimum overhead). The big win (72/60 MB vs ~190/203) is on *returning*
+  memory after a burst, which glibc/jemalloc largely don't do.
+- **P costs little at peak and is roughly throughput-neutral here** (372→378 MB
+  over P=1→1024). P's *benefits* — call-site cohorting for reclamation and
+  segregation for security — need workloads/metrics that stress them; a
+  general held-working-set workload doesn't, so raising P is nearly free.
+- **Throughput is within ~5% of glibc** on a real application.
+
+This is the trade-off profile of the design: wins on cross-thread free and
+post-burst memory return; roughly neutral-to-slightly-behind on single-thread
+throughput and peak footprint of a held working set.
+
 ## Takeaways
 
 - **Win to defend:** cross-thread free / producer-consumer scaling.
