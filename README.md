@@ -22,6 +22,11 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full rationale and
   eliminates mmap/munmap thrash.
 - Drop-in via `LD_PRELOAD`: runs python, git, gcc, perl, bash, and parallel
   builds cleanly.
+- **Security**: freelist safe-linking (obfuscated free-pointers) always on;
+  optional deterministic per-call-site segregation (`BTM_PARTITION_MODE=intern`,
+  a Cling/SeMalloc-style anti-type-confusion guarantee); and a zero-cost
+  call-site heap profiler that can attribute a corrupted slab to where it was
+  allocated.
 
 Trade-off: the single-threaded small-object fast path trails jemalloc
 (~6.7 ns vs ~2.3 ns) — the cost of hashing a call site into a cache bin instead

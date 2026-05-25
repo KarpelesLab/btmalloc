@@ -126,6 +126,26 @@ doesn't touch. Flattening it is a refill-path optimization, separate from
 async backing. Async helps the *free* path (madvise offloaded) — not visible in
 a malloc-latency bench.
 
+## Phase I — security hardening (freelist safe-linking + call-site forensics)
+
+btmalloc now stores every free slot's next-pointer XORed with a per-process
+random secret (seeded from getrandom) and the slot's own page address
+(safe-linking, as in glibc 2.32+ and mimalloc). A heap overflow that overwrites
+a freed object's link can no longer steer the allocator to an attacker-chosen
+address — the corrupted value decodes to an unpredictable, unusable pointer.
+
+Combined with `BTM_PARTITION_MODE=intern` (deterministic per-call-site
+segregation, which blocks cross-type reuse) and the call-site heap profiler
+(`btm_heap_profile`, which can name the call site that allocated a corrupted
+slab — forensics no size/thread-keyed allocator can provide), btmalloc now has
+a coherent exploitation-mitigation story.
+
+Cost: ~0 — one XOR folded into each freelist load/store; churn is unchanged
+(~6.7 ns). Verified: `test_harden` confirms freed slots store an obfuscated
+link, not the raw next address; round-trip correctness is covered by the
+millions-of-ops shadow-map stress test running with safe-linking active; ASan
+clean; git/python/bash run under LD_PRELOAD.
+
 ## Phase H — out-of-line slab metadata (and its RSS payoff)
 
 Slab descriptors were moved out of the data region into a per-chunk descriptor

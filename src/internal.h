@@ -43,6 +43,22 @@
 #define BTM_CHUNK_MAGIC      ((uint64_t)0xB7A110C0CB7C7BEEULL)
 #define BTM_LARGE_MAGIC      ((uint64_t)0xB7A110CC1A56A110ULL)
 
+/* ---- freelist hardening (safe-linking) ----
+ * Every free slot's next-pointer is stored XORed with a per-process random
+ * secret and the slot's own page address, so a heap overflow that overwrites it
+ * cannot forge a pointer the allocator will hand back at an attacker-chosen
+ * address (the corrupted value decodes to an unpredictable, unusable one). One
+ * XOR per freelist touch. */
+extern uintptr_t btm_fl_key;
+static inline void *btm_fl_get(const void *slot) {
+    return (void *)(*(const uintptr_t *)slot ^ btm_fl_key ^
+                    ((uintptr_t)slot >> BTM_PAGE_SHIFT));
+}
+static inline void btm_fl_set(void *slot, void *next) {
+    *(uintptr_t *)slot = (uintptr_t)next ^ btm_fl_key ^
+                         ((uintptr_t)slot >> BTM_PAGE_SHIFT);
+}
+
 /* ---- Forward decls ---- */
 struct btm_partition;
 typedef struct btm_partition btm_partition_t;

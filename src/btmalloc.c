@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/random.h>
 #include <unistd.h>
 
 /* ---------------- globals ---------------- */
@@ -30,6 +31,7 @@ unsigned         btm_nparts = 1;
 _Atomic(int)     btm_ready;
 int              btm_intern_mode;
 int              btm_mesh_mode;
+uintptr_t        btm_fl_key; /* freelist safe-linking secret */
 
 static pthread_once_t btm_init_once = PTHREAD_ONCE_INIT;
 
@@ -116,6 +118,14 @@ static void btm_do_init(void) {
     btm_size_class_init();
     btm_chunk_init();
 
+    /* Seed the freelist safe-linking secret from the kernel CSPRNG. */
+    if (getrandom(&btm_fl_key, sizeof btm_fl_key, 0) != (ssize_t)sizeof btm_fl_key) {
+        /* Fallback: mix ASLR'd addresses and the clock — weaker but never 0. */
+        btm_fl_key = (uintptr_t)&btm_fl_key ^ ((uintptr_t)&btm_do_init << 13);
+        btm_fl_key ^= (uintptr_t)pthread_self() * 0x9E3779B97F4A7C15ull;
+    }
+    btm_fl_key |= 1; /* never zero */
+
     unsigned np = read_nparts_env();
     size_t bytes = (size_t)np * sizeof(btm_partition_t);
     btm_partition_t *parts = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
@@ -189,7 +199,7 @@ void *btm_malloc_at(size_t size, void *ra) {
 
     void *p = bin->free_head;
     if (BTM_LIKELY(p != NULL)) {
-        bin->free_head = *(void **)p;
+        bin->free_head = btm_fl_get(p);
         bin->count--;
         return p;
     }
@@ -230,7 +240,7 @@ void btm_free(void *ptr) {
     }
     btm_tls_bin_t *bin = btm_tls_bin_at(t, pidx, sc);
     bin->pool = c->pool; /* the chunk's pool is exactly (pidx, sc)'s pool */
-    *(void **)ptr = bin->free_head;
+    btm_fl_set(ptr, bin->free_head);
     bin->free_head = ptr;
     bin->count++;
     unsigned cap = btm_cache_max(sc);

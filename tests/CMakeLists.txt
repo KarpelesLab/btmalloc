@@ -12,6 +12,7 @@ endfunction()
 
 btm_add_test(test_basic)
 btm_add_test(test_stress)
+btm_add_test(test_harden)
 btm_add_test(test_compact)
 set_tests_properties(test_compact PROPERTIES ENVIRONMENT "BTM_MESH=1")
 

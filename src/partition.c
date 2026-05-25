@@ -78,7 +78,7 @@ static void slab_format(btm_slab_t *slab, btm_partition_t *part, int sc) {
     void *next = NULL;
     for (uint32_t i = nslots; i-- > 0;) {
         void *s = data + (size_t)i * slot;
-        *(void **)s = next;
+        btm_fl_set(s, next);
         next = s;
     }
     slab->free_head = next;
@@ -207,8 +207,8 @@ void *btm_pool_refill(btm_partition_t *part, int sc, btm_tls_bin_t *bin,
     unsigned n = 0;
     while (n < want && slab->free_head) {
         void *s = slab->free_head;
-        slab->free_head = *(void **)s;
-        *(void **)s = local;
+        slab->free_head = btm_fl_get(s);
+        btm_fl_set(s, local);
         local = s;
         n++;
     }
@@ -220,12 +220,12 @@ void *btm_pool_refill(btm_partition_t *part, int sc, btm_tls_bin_t *bin,
     if (n == 0) return NULL;
 
     void *p = local;
-    local = *(void **)local;
+    local = btm_fl_get(local);
     n--;
     if (n) {
         void *tail = local;
-        for (unsigned i = 1; i < n; i++) tail = *(void **)tail;
-        *(void **)tail = bin->free_head;
+        for (unsigned i = 1; i < n; i++) tail = btm_fl_get(tail);
+        btm_fl_set(tail, bin->free_head);
         bin->free_head = local;
         bin->count += n;
     }
@@ -239,13 +239,13 @@ void btm_pool_flush(btm_tls_bin_t *bin, unsigned keep) {
     pthread_mutex_lock(&pool->lock);
     while (bin->count > keep) {
         void *s = bin->free_head;
-        bin->free_head = *(void **)s;
+        bin->free_head = btm_fl_get(s);
         bin->count--;
         pool->outstanding--; /* returning a slot to the pool */
 
         btm_chunk_t *c = chunk_of(s);
         btm_slab_t *slab = btm_slab_of(c, s);
-        *(void **)s = slab->free_head;
+        btm_fl_set(s, slab->free_head);
         slab->free_head = s;
         slab->free_count++;
         if (slab->retired) {
@@ -273,7 +273,7 @@ static unsigned build_occ(btm_slab_t *s, uint64_t *bm) {
 
     char *data = btm_slab_data(s);
     size_t slot = btm_sc_to_size[s->sc];
-    for (void *f = s->free_head; f; f = *(void **)f) {
+    for (void *f = s->free_head; f; f = btm_fl_get(f)) {
         size_t idx = (size_t)((char *)f - data) / slot;
         bm[idx / 64] &= ~(1ULL << (idx % 64));
     }
@@ -304,7 +304,7 @@ static size_t mesh_pair(btm_scpool_t *pool, btm_slab_t *R, btm_slab_t *D,
         int d_occ = (Docc[k / 64] >> (k % 64)) & 1;
         if (!r_occ && !d_occ) {
             void *s = Rd + (size_t)k * slot;
-            *(void **)s = head;
+            btm_fl_set(s, head);
             head = s;
             cnt++;
         }
@@ -373,7 +373,7 @@ size_t btm_compact(void) {
 void btm_pool_free_one(btm_slab_t *slab, void *ptr) {
     btm_scpool_t *pool = &btm_partitions[slab->part_idx].pools[slab->sc];
     pthread_mutex_lock(&pool->lock);
-    *(void **)ptr = slab->free_head;
+    btm_fl_set(ptr, slab->free_head);
     slab->free_head = ptr;
     slab->free_count++;
     if (pool->outstanding) pool->outstanding--;
