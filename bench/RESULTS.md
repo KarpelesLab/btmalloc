@@ -260,6 +260,50 @@ home-pool cross-thread-free model (btmalloc's actual scaling advantage over
 per-arena allocators) while dropping the hash. Note `prodcons` is also slightly
 faster with partitioning off, for the same single-call-site reason.
 
+## Owner-resolution engines (`BTM_OWNER_ENGINE`)
+
+`free()` must map a pointer back to its owning chunk without dereferencing it
+(so foreign frees are ignored, not faulted). Three *fault-free* strategies are
+selectable at build time and were compared head-to-head (64 B, best-of-5,
+hardening on = shipping default):
+
+| engine | churn (hot) | random free (scattered) | fifo free | prodcons 8T | python | per-thread cost |
+| --- | --- | --- | --- | --- | --- | --- |
+| `registry` (radix + rcache + gen, default) | 6.60 ns | 26 ns | 42 ns | 9.16 Mops | 271 ms | rcache 384 B + gen counter |
+| `flat` (single 512 MiB lazy table, 1 load) | 6.56 ns | 25 ns | 38 ns | 9.01 Mops | 267 ms | none (+512 MiB sparse VA) |
+| `nocache` (radix, no rcache) | 6.73 ns | **19 ns** | **38 ns** | **9.34 Mops** | 273 ms | none |
+| _mimalloc (ref)_ | 2.55 ns | 15 ns | 25 ns | — | — | — |
+
+(churn = `micro_churn` ns/op; random/fifo = `micro_*` `free_ns_per_op`, a
+many-region scattered free; python = an alloc-heavy interpreter loop, wall time.)
+
+Findings — most of them against the original expectation:
+
+- **On hot single-region churn the engine barely matters** (6.6–6.7 ns, ~3 %
+  spread). The resolved region stays L1-hot, so the rcache hit, the flat single
+  load, and even the two-load radix all cost about the same. The resolver is not
+  where the mimalloc gap lives.
+- **The per-thread `rcache` does not earn its keep.** On scattered frees it
+  *misses every time* (a 16-entry cache can't cover thousands of live regions),
+  so it adds an atomic gen-load plus a failed lookup and a cache-fill write on
+  top of the radix walk it still has to do — `nocache` is ~27 % faster there
+  (19 vs 26 ns) and marginally faster cross-thread. No measured workload favored
+  the rcache.
+- **`flat` trades structure for locality.** One bounds-checked load (no atomic,
+  no cache) makes it competitive on hot/cross-thread, but its 512 MiB sparse
+  table costs TLB/cache misses under scattered access, so it loses to the
+  compact radix leaves on `random` (25 vs 19 ns). Clean design, situational.
+- **On a real program the choice is in the noise** (267–273 ms, ~2 %): malloc is
+  a small fraction of real work, so the micro-deltas don't propagate.
+
+Net: among safe engines, `nocache` (plain radix) is the simplest and is ≥ the
+rcache-fronted `registry` on everything measured; `flat` is an interesting
+single-load point with a scattered-access liability. `registry` remains the
+default (no shipping change) pending a workload with strong region temporal
+locality that the rcache was meant for — which none of these benchmarks exhibit.
+(An unsafe mask-and-magic engine was excluded: it faults on foreign frees; see
+the decomposition section above.)
+
 ## Phase H — out-of-line slab metadata (and its RSS payoff)
 
 Slab descriptors were moved out of the data region into a per-chunk descriptor

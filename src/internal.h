@@ -34,6 +34,20 @@
 #define BTM_HARDENING 1
 #endif
 
+/* ---- Owner-resolution engine ----
+ * free() maps a pointer back to its owning chunk without dereferencing it (so
+ * foreign frees are ignored, not faulted — essential for an LD_PRELOAD drop-in).
+ * Every engine stores the same per-region owner word (chunk base, base|1 for a
+ * large alloc, or 0 for foreign); they differ only in the table structure and
+ * whether a per-thread cache fronts it. Selectable at build time so the
+ * strategies can be compared. See bench/RESULTS.md. */
+#define BTM_OWNER_REGISTRY 0  /* two-level radix + per-thread rcache + gen (default) */
+#define BTM_OWNER_FLAT     1  /* single flat lazily-mapped owner table: one load   */
+#define BTM_OWNER_NOCACHE  2  /* radix table, no per-thread rcache                 */
+#ifndef BTM_OWNER_ENGINE
+#define BTM_OWNER_ENGINE BTM_OWNER_REGISTRY
+#endif
+
 /* ---- Geometry ---- */
 #define BTM_PAGE_SHIFT       12
 #define BTM_PAGE_SIZE        ((size_t)1 << BTM_PAGE_SHIFT)        /* 4 KiB */
@@ -177,16 +191,23 @@ typedef struct btm_tls_bin {
  * common case of freeing into recently-touched regions skips the radix walk.
  * Validated against btm_registry_gen, which is bumped whenever a region's
  * owner is cleared (large free, or chunk reclaim in later phases), so stale
- * entries are detected with one cheap compare. */
+ * entries are detected with one cheap compare. Only the registry engine uses
+ * it; other engines compile it out (smaller TLS struct). */
+#if BTM_OWNER_ENGINE == BTM_OWNER_REGISTRY
 #define BTM_RCACHE 16 /* power of two */
 typedef struct btm_rcache_ent {
     uintptr_t region;
     uintptr_t owner;
     uint64_t  gen;
 } btm_rcache_ent_t;
+#endif
 
 typedef struct btm_tls {
+#if BTM_OWNER_ENGINE == BTM_OWNER_REGISTRY
     btm_rcache_ent_t rcache[BTM_RCACHE];
+#else
+    uintptr_t        _resv; /* C requires a named member before the flex array */
+#endif
     btm_tls_bin_t    bins[]; /* btm_nparts * BTM_NUM_SIZE_CLASSES entries */
 } btm_tls_t;
 
@@ -227,7 +248,9 @@ extern const uint16_t btm_cache_max_tbl[BTM_NUM_SIZE_CLASSES];
 static inline unsigned btm_cache_max(int sc) { return btm_cache_max_tbl[sc]; }
 
 /* ---- chunk.c: pointer registry ---- */
+#if BTM_OWNER_ENGINE == BTM_OWNER_REGISTRY
 extern _Atomic(uint64_t) btm_registry_gen BTM_HIDDEN; /* bumped on any removal */
+#endif
 void        btm_chunk_init(void) BTM_HIDDEN;
 /* Resolve a user pointer to its owning header base, or 0 if foreign.
  * The returned address begins with a magic word (CHUNK or LARGE). */
@@ -270,6 +293,7 @@ void        btm_registry_remove(uintptr_t base, size_t len) BTM_HIDDEN;
  * fault-free guard that avoids this; its cost is the price of safe foreign-free
  * handling, not removable overhead. See bench/RESULTS.md. */
 static inline uintptr_t btm_resolve_owner(btm_tls_t *t, const void *ptr) {
+#if BTM_OWNER_ENGINE == BTM_OWNER_REGISTRY
     if (BTM_UNLIKELY(t == NULL)) return btm_registry_lookup(ptr);
     uintptr_t region = (uintptr_t)ptr >> BTM_CHUNK_SHIFT;
     uint64_t gen = atomic_load_explicit(&btm_registry_gen, memory_order_acquire);
@@ -280,6 +304,11 @@ static inline uintptr_t btm_resolve_owner(btm_tls_t *t, const void *ptr) {
     uintptr_t owner = btm_registry_lookup(ptr);
     if (owner) { e->region = region; e->owner = owner; e->gen = gen; }
     return owner;
+#else
+    /* FLAT / NOCACHE: no per-thread cache — the table lookup is the hot path. */
+    (void)t;
+    return btm_registry_lookup(ptr);
+#endif
 }
 
 /* The chunk's descriptor array (lives in chunk pages 1..K). */

@@ -70,6 +70,7 @@ io_uring (5.x+; tested on 6.12).
 | `BTM_OVERRIDE_LIBC` | `ON` | Compile libc symbol overrides into the shared lib |
 | `BTM_HARDENING` | `ON` | Freelist safe-linking + double-free detection. Off = plain freelists (≈3-4% faster churn, no overflow/double-free protection) |
 | `BTM_PARTITIONING` | `ON` | Call-site (return-address) partitioning — the defining feature. Off = a single partition (ordinary per-size-class allocator): no return-address hash, ≈7-10% faster small churn, but no call-site segregation, RSS cohorting, or `intern`/profiling. `BTM_PARTITIONS`/`BTM_PARTITION_MODE` become no-ops |
+| `BTM_OWNER_ENGINE` | `registry` | Fault-free pointer→owner resolver for `free()`: `registry` (radix + per-thread cache), `flat` (single 512 MiB lazy table, one load), or `nocache` (radix only). See [bench/RESULTS.md](bench/RESULTS.md) — `nocache` matches/beats the default on every measured workload |
 | `BTM_ASAN` | `OFF` | Build with AddressSanitizer (forces `BTM_OVERRIDE_LIBC=OFF`) |
 
 ### Runtime knobs

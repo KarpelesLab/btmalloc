@@ -29,6 +29,9 @@ option(BTM_DEBUG_FILL     "Fill freed memory with 0xDF (debug aid)" OFF)
 option(BTM_ASAN           "Build with AddressSanitizer"             OFF)
 option(BTM_HARDENING      "Freelist safe-linking + double-free detection" ON)
 option(BTM_PARTITIONING   "Call-site (return-address) partitioning"       ON)
+set(BTM_OWNER_ENGINE      "registry" CACHE STRING
+    "Owner-resolution engine: registry | flat | nocache")
+set_property(CACHE BTM_OWNER_ENGINE PROPERTY STRINGS registry flat nocache)
 
 # ASan ships its own malloc; can't sensibly coexist with our overrides.
 if(BTM_ASAN AND BTM_OVERRIDE_LIBC)
@@ -58,6 +61,17 @@ if(BTM_PARTITIONING)
     add_compile_definitions(BTM_PARTITIONING=1)
 else()
     add_compile_definitions(BTM_PARTITIONING=0)
+endif()
+
+# Owner-resolution engine: how free() maps a pointer back to its owning chunk.
+if(BTM_OWNER_ENGINE STREQUAL "registry")
+    add_compile_definitions(BTM_OWNER_ENGINE=0)
+elseif(BTM_OWNER_ENGINE STREQUAL "flat")
+    add_compile_definitions(BTM_OWNER_ENGINE=1)
+elseif(BTM_OWNER_ENGINE STREQUAL "nocache")
+    add_compile_definitions(BTM_OWNER_ENGINE=2)
+else()
+    message(FATAL_ERROR "BTM_OWNER_ENGINE must be registry, flat, or nocache (got '${BTM_OWNER_ENGINE}')")
 endif()
 
 # Per-config flags.
@@ -148,3 +162,4 @@ message(STATUS "  BTM_DEBUG_FILL       = ${BTM_DEBUG_FILL}")
 message(STATUS "  BTM_ASAN             = ${BTM_ASAN}")
 message(STATUS "  BTM_HARDENING        = ${BTM_HARDENING}")
 message(STATUS "  BTM_PARTITIONING     = ${BTM_PARTITIONING}")
+message(STATUS "  BTM_OWNER_ENGINE     = ${BTM_OWNER_ENGINE}")
