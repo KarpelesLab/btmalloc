@@ -31,8 +31,10 @@ unsigned         btm_nparts = 1;
 _Atomic(int)     btm_ready;
 int              btm_intern_mode;
 int              btm_mesh_mode;
-int              btm_harden_mode; /* BTM_HARDEN=1: double-free detection */
 uintptr_t        btm_fl_key;      /* freelist safe-linking secret */
+#if BTM_HARDENING
+int              btm_harden_mode; /* BTM_HARDEN=1: double-free detection */
+#endif
 _Atomic(uint32_t) btm_tier_epoch; /* advanced by btm_pageout_cold */
 
 static pthread_once_t btm_init_once = PTHREAD_ONCE_INIT;
@@ -120,6 +122,7 @@ static void btm_do_init(void) {
     btm_size_class_init();
     btm_chunk_init();
 
+#if BTM_HARDENING
     /* Seed the freelist safe-linking secret from the kernel CSPRNG. */
     if (getrandom(&btm_fl_key, sizeof btm_fl_key, 0) != (ssize_t)sizeof btm_fl_key) {
         /* Fallback: mix ASLR'd addresses and the clock — weaker but never 0. */
@@ -127,6 +130,7 @@ static void btm_do_init(void) {
         btm_fl_key ^= (uintptr_t)pthread_self() * 0x9E3779B97F4A7C15ull;
     }
     btm_fl_key |= 1; /* never zero */
+#endif
 
     unsigned np = read_nparts_env();
     size_t bytes = (size_t)np * sizeof(btm_partition_t);
@@ -153,10 +157,12 @@ static void btm_do_init(void) {
     }
 
     /* Optional deterministic call-site -> partition interning. */
+#if BTM_HARDENING
     {
         const char *h = getenv("BTM_HARDEN");
         if (h && h[0] == '1') btm_harden_mode = 1;
     }
+#endif
 
     const char *mode = getenv("BTM_PARTITION_MODE");
     if (mode && (mode[0] == 'i' || mode[0] == 'I')) { /* "intern" */
@@ -211,7 +217,9 @@ void *btm_malloc_at(size_t size, void *ra) {
     if (BTM_LIKELY(p != NULL)) {
         bin->free_head = btm_fl_get(p);
         bin->count--;
+#if BTM_HARDENING
         if (BTM_UNLIKELY(btm_harden_mode)) ((uintptr_t *)p)[1] = 0; /* clear canary */
+#endif
         return p;
     }
 
@@ -223,12 +231,15 @@ void *btm_malloc_at(size_t size, void *ra) {
     unsigned want = btm_cache_max(sc) / 2;
     if (want < 1) want = 1;
     p = btm_pool_refill(&btm_partitions[part], sc, bin, want);
+#if BTM_HARDENING
     if (BTM_UNLIKELY(btm_harden_mode) && p) ((uintptr_t *)p)[1] = 0;
+#endif
     return p;
 }
 
+#if BTM_HARDENING
 /* Report a detected double-free, attributing it to the call site that fed the
- * containing slab's partition, then abort. */
+ * containing chunk's partition, then abort. */
 __attribute__((noinline))
 static void btm_double_free(void *ptr, btm_chunk_t *c) {
     void *ra = btm_partitions[c->part_idx].sample_ra;
@@ -246,6 +257,7 @@ static void btm_double_free(void *ptr, btm_chunk_t *c) {
     if (n > 0) { ssize_t w = write(2, line, (size_t)n); (void)w; }
     abort();
 }
+#endif /* BTM_HARDENING */
 
 void btm_free(void *ptr) {
     if (!ptr) return;
@@ -272,18 +284,22 @@ void btm_free(void *ptr) {
         t = btm_tls_get();
         if (!t) { btm_pool_free_one(btm_slab_of(c, ptr), ptr); return; }
     }
+#if BTM_HARDENING
     if (BTM_UNLIKELY(btm_harden_mode)) {
         /* Detect a (consecutive) double-free: the slot still carries the canary
          * stamped at its last free and not yet cleared by a reallocation. */
         if (((uintptr_t *)ptr)[1] == btm_df_canary(ptr)) btm_double_free(ptr, c);
     }
+#endif
 
     btm_tls_bin_t *bin = btm_tls_bin_at(t, pidx, sc);
     bin->pool = c->pool; /* the chunk's pool is exactly (pidx, sc)'s pool */
     btm_fl_set(ptr, bin->free_head);
     bin->free_head = ptr;
     bin->count++;
+#if BTM_HARDENING
     if (BTM_UNLIKELY(btm_harden_mode)) ((uintptr_t *)ptr)[1] = btm_df_canary(ptr);
+#endif
     unsigned cap = btm_cache_max(sc);
     if (BTM_UNLIKELY(bin->count > cap)) btm_pool_flush(bin, cap / 2);
 }

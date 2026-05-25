@@ -188,6 +188,14 @@ partition (unique to PC anchoring). Cost ~0.8 ns/op (opt-in; default path
 untouched). `test_doublefree` confirms detection (child aborts on SIGABRT) and
 no false positives on legitimate churn.
 
+Hardening is a compile-time switch (`-DBTM_HARDENING=ON|OFF`, default ON);
+turning it off compiles out safe-linking (plain freelist load/store) and the
+double-free machinery. Measured cost of hardening on single-thread churn:
+~6.85 ns ON vs ~6.65 ns OFF — about 3-4%, consistent with the profiling finding
+that the XOR is not the dominant churn cost (the partition hash and resolve
+are). The test suite passes in both configurations (test_harden and
+test_doublefree adapt via `#if BTM_HARDENING`); the OFF build also fuzzes clean.
+
 (Building the double-free path surfaced and fixed a latent correctness bug: the
 size-class lookup table was read before lazy init had built it, so the very
 first allocation of a process returned a 16-byte slot regardless of requested

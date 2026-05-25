@@ -19,6 +19,10 @@
 #define CHECK(e) do { if (!(e)) { \
     fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #e); abort(); } } while (0)
 
+#ifndef BTM_HARDENING
+#define BTM_HARDENING 1
+#endif
+
 int main(void) {
     /* Legitimate churn must not false-positive. */
     void *keep[512];
@@ -35,6 +39,11 @@ int main(void) {
     btm_free(b);
     printf("PASS: legitimate workload, no false positive\n");
 
+#if !BTM_HARDENING
+    /* Hardening compiled out: no detection to test. */
+    puts("test_doublefree: hardening disabled, detection not compiled in (ok)");
+    return 0;
+#else
     /* Now a real double-free, in a child, expecting SIGABRT. */
     pid_t pid = fork();
     if (pid == 0) {
@@ -53,4 +62,5 @@ int main(void) {
 
     puts("test_doublefree: all passed");
     return 0;
+#endif
 }

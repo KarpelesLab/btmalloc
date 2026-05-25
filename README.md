@@ -25,11 +25,12 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full rationale and
   the "hotness fragmentation" problem from recent (2025-26) research.
 - Drop-in via `LD_PRELOAD`: runs python, git, gcc, perl, bash, and parallel
   builds cleanly.
-- **Security**: freelist safe-linking (obfuscated free-pointers) always on;
-  optional deterministic per-call-site segregation (`BTM_PARTITION_MODE=intern`,
-  a Cling/SeMalloc-style anti-type-confusion guarantee); and a zero-cost
-  call-site heap profiler that can attribute a corrupted slab to where it was
-  allocated.
+- **Security** (compile-time `BTM_HARDENING`, on by default; ≈3-4% churn cost):
+  freelist safe-linking (obfuscated free-pointers) and double-free detection;
+  plus optional deterministic per-call-site segregation
+  (`BTM_PARTITION_MODE=intern`, a Cling/SeMalloc-style anti-type-confusion
+  guarantee) and a zero-cost call-site heap profiler that can attribute a
+  corrupted slab to where it was allocated.
 
 Trade-off: the single-threaded small-object fast path trails jemalloc
 (~6.7 ns vs ~2.3 ns) — the cost of hashing a call site into a cache bin instead
@@ -67,6 +68,7 @@ io_uring (5.x+; tested on 6.12).
 | `BTM_BUILD_TESTS` | `ON` | Build the CTest suite |
 | `BTM_BUILD_BENCH` | `OFF` | Build the benchmarks under `bench/` |
 | `BTM_OVERRIDE_LIBC` | `ON` | Compile libc symbol overrides into the shared lib |
+| `BTM_HARDENING` | `ON` | Freelist safe-linking + double-free detection. Off = plain freelists (≈3-4% faster churn, no overflow/double-free protection) |
 | `BTM_ASAN` | `OFF` | Build with AddressSanitizer (forces `BTM_OVERRIDE_LIBC=OFF`) |
 
 ### Runtime knobs

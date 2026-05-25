@@ -28,6 +28,12 @@
 #define BTM_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #define BTM_HIDDEN      __attribute__((visibility("hidden")))
 
+/* Security hardening (freelist safe-linking + double-free detection) is on
+ * unless the build defines BTM_HARDENING=0. */
+#ifndef BTM_HARDENING
+#define BTM_HARDENING 1
+#endif
+
 /* ---- Geometry ---- */
 #define BTM_PAGE_SHIFT       12
 #define BTM_PAGE_SIZE        ((size_t)1 << BTM_PAGE_SHIFT)        /* 4 KiB */
@@ -44,12 +50,14 @@
 #define BTM_LARGE_MAGIC      ((uint64_t)0xB7A110CC1A56A110ULL)
 
 /* ---- freelist hardening (safe-linking) ----
- * Every free slot's next-pointer is stored XORed with a per-process random
- * secret and the slot's own page address, so a heap overflow that overwrites it
- * cannot forge a pointer the allocator will hand back at an attacker-chosen
- * address (the corrupted value decodes to an unpredictable, unusable one). One
- * XOR per freelist touch. */
+ * When enabled, every free slot's next-pointer is stored XORed with a
+ * per-process random secret and the slot's own page address, so a heap overflow
+ * that overwrites it cannot forge a pointer the allocator will hand back at an
+ * attacker-chosen address (the corrupted value decodes to an unpredictable,
+ * unusable one). One XOR per freelist touch. Compiled out when BTM_HARDENING=0
+ * (plain pointer store/load — faster, no overflow protection). */
 extern uintptr_t btm_fl_key;
+#if BTM_HARDENING
 static inline void *btm_fl_get(const void *slot) {
     return (void *)(*(const uintptr_t *)slot ^ btm_fl_key ^
                     ((uintptr_t)slot >> BTM_PAGE_SHIFT));
@@ -58,16 +66,17 @@ static inline void btm_fl_set(void *slot, void *next) {
     *(uintptr_t *)slot = (uintptr_t)next ^ btm_fl_key ^
                          ((uintptr_t)slot >> BTM_PAGE_SHIFT);
 }
-
-/* ---- double-free detection (opt-in, BTM_HARDEN=1) ----
- * A freed slot stamps a key-derived canary into its second word; the canary is
- * cleared when the slot is handed back out. Freeing a slot whose canary is
- * still present is a (consecutive) double-free. All size classes are >= 16 B,
- * so the second word is always inside the slot. */
-extern int btm_harden_mode;
+/* A freed slot stamps a key-derived canary into its second word; the canary is
+ * cleared when the slot is handed back out. Freeing a slot that still carries
+ * it is a (consecutive) double-free. All size classes are >= 16 B. */
+extern int btm_harden_mode; /* BTM_HARDEN=1: double-free detection */
 static inline uintptr_t btm_df_canary(const void *slot) {
     return (uintptr_t)slot ^ btm_fl_key ^ (uintptr_t)0xD0FF1EE5DEADC0DEULL;
 }
+#else
+static inline void *btm_fl_get(const void *slot) { return *(void *const *)slot; }
+static inline void btm_fl_set(void *slot, void *next) { *(void **)slot = next; }
+#endif
 
 /* ---- Forward decls ---- */
 struct btm_partition;

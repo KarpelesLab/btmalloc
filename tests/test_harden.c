@@ -42,12 +42,22 @@ int main(void) {
     for (int i = 0; i < N; i++) btm_free(a[i]);
 
     uintptr_t stored = *(volatile uintptr_t *)a[N - 1];
+#ifndef BTM_HARDENING
+#define BTM_HARDENING 1
+#endif
+#if BTM_HARDENING
     /* Stored raw, this would equal a[N-2] exactly — the tcache-poisoning
      * primitive. Safe-linking makes it something unpredictable. */
     CHECK(stored != (uintptr_t)a[N - 2]);
     CHECK(stored != 0);
     printf("PASS: freed slot link is obfuscated (stored=%p != next=%p)\n",
            (void *)stored, a[N - 2]);
+#else
+    /* Hardening compiled out: the link is stored raw (faster, unprotected). */
+    CHECK(stored == (uintptr_t)a[N - 2]);
+    printf("PASS: hardening disabled, link stored raw as expected (%p)\n",
+           (void *)stored);
+#endif
 
     /* Re-allocate and use them to confirm the allocator is still consistent. */
     for (int i = 0; i < N; i++) {

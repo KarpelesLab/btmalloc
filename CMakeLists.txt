@@ -27,6 +27,7 @@ option(BTM_BUILD_BENCH    "Build benchmark suite (lands in M4)"     OFF)
 option(BTM_OVERRIDE_LIBC  "Override libc malloc symbols (M3+)"      ON)
 option(BTM_DEBUG_FILL     "Fill freed memory with 0xDF (debug aid)" OFF)
 option(BTM_ASAN           "Build with AddressSanitizer"             OFF)
+option(BTM_HARDENING      "Freelist safe-linking + double-free detection" ON)
 
 # ASan ships its own malloc; can't sensibly coexist with our overrides.
 if(BTM_ASAN AND BTM_OVERRIDE_LIBC)
@@ -42,6 +43,13 @@ add_compile_options(
     -pthread
     -D_GNU_SOURCE
 )
+
+# Security hardening on/off, visible to the library and the tests.
+if(BTM_HARDENING)
+    add_compile_definitions(BTM_HARDENING=1)
+else()
+    add_compile_definitions(BTM_HARDENING=0)
+endif()
 
 # Per-config flags.
 add_compile_options(
@@ -129,3 +137,4 @@ message(STATUS "  BTM_BUILD_BENCH      = ${BTM_BUILD_BENCH}")
 message(STATUS "  BTM_OVERRIDE_LIBC    = ${BTM_OVERRIDE_LIBC}")
 message(STATUS "  BTM_DEBUG_FILL       = ${BTM_DEBUG_FILL}")
 message(STATUS "  BTM_ASAN             = ${BTM_ASAN}")
+message(STATUS "  BTM_HARDENING        = ${BTM_HARDENING}")
