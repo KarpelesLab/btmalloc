@@ -255,9 +255,25 @@ void        btm_release_pages(void *vaddr, uint64_t memfd_off, size_t len) BTM_H
 /* Register / unregister the 2 MiB regions [base, base+len) -> owner. */
 void        btm_registry_insert(uintptr_t base, size_t len, uintptr_t owner) BTM_HIDDEN;
 void        btm_registry_remove(uintptr_t base, size_t len) BTM_HIDDEN;
+#ifndef BTM_TRUST_FREE
+#define BTM_TRUST_FREE 0
+#endif
+
 /* Resolve a pointer to its owning header base, using the per-thread region
  * cache first and falling back to the radix registry. Returns 0 if foreign. */
 static inline uintptr_t btm_resolve_owner(btm_tls_t *t, const void *ptr) {
+#if BTM_TRUST_FREE
+    /* Trusting fast path (mimalloc-style): a small alloc's owning chunk is the
+     * 2 MiB-aligned base, whose first word is the magic. One masked load + one
+     * compare replaces the atomic gen-load and rcache walk. Large/foreign
+     * pointers miss the magic and fall back to the safe registry lookup. The
+     * cost: a foreign pointer whose masked base is unmapped will fault here
+     * rather than being silently ignored. */
+    uintptr_t base = (uintptr_t)ptr & ~(BTM_CHUNK_SIZE - 1);
+    if (BTM_LIKELY(((const btm_chunk_t *)base)->magic == BTM_CHUNK_MAGIC))
+        return base;
+    return btm_registry_lookup(ptr);
+#else
     if (BTM_UNLIKELY(t == NULL)) return btm_registry_lookup(ptr);
     uintptr_t region = (uintptr_t)ptr >> BTM_CHUNK_SHIFT;
     uint64_t gen = atomic_load_explicit(&btm_registry_gen, memory_order_acquire);
@@ -268,6 +284,7 @@ static inline uintptr_t btm_resolve_owner(btm_tls_t *t, const void *ptr) {
     uintptr_t owner = btm_registry_lookup(ptr);
     if (owner) { e->region = region; e->owner = owner; e->gen = gen; }
     return owner;
+#endif
 }
 
 /* The chunk's descriptor array (lives in chunk pages 1..K). */
@@ -321,10 +338,21 @@ void *btm_malloc_at(size_t size, void *ra) BTM_HIDDEN;
 void *btm_calloc_at(size_t n, size_t size, void *ra) BTM_HIDDEN;
 void *btm_realloc_at(void *ptr, size_t size, void *ra) BTM_HIDDEN;
 
+/* Call-site partitioning is the defining feature, but it can be compiled out
+ * (BTM_PARTITIONING=0): all allocations then share a single partition, turning
+ * btmalloc into an ordinary per-size-class allocator. This removes the
+ * return-address hash from every malloc and collapses the bin table to one row
+ * per size class — trading away cross-thread-free locality, RSS cohorting, and
+ * the intern/profiling machinery for a shorter fast path. */
+#ifndef BTM_PARTITIONING
+#define BTM_PARTITIONING 1
+#endif
+
 /* Partition selector. Default: hash the return address (statistical
  * segregation, collisions possible from the start). Intern mode: a stable
  * unique partition per distinct call site (deterministic segregation). */
 static inline unsigned btm_partition_of(void *ra) {
+#if BTM_PARTITIONING
     if (btm_intern_mode) {
         if (BTM_LIKELY(ra == btm_tls_intern_ra)) return btm_tls_intern_part;
         return btm_intern_slow(ra);
@@ -334,6 +362,10 @@ static inline unsigned btm_partition_of(void *ra) {
     x *= 0xff51afd7ed558ccdULL;
     x ^= x >> 29;
     return (unsigned)x & (btm_nparts - 1);
+#else
+    (void)ra;
+    return 0; /* single partition: no hash, no intern lookup */
+#endif
 }
 
 #endif /* BTM_INTERNAL_H */

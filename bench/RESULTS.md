@@ -202,6 +202,41 @@ first allocation of a process returned a 16-byte slot regardless of requested
 size — a heap overflow for any first allocation > 16 B. The table is now a
 compile-time constant, valid before any init.)
 
+## Why single-thread small churn trails mimalloc (decomposition)
+
+mimalloc does ~2.6 ns/op on 64 B churn; btmalloc (default) ~6.6 ns. callgrind
+with cache simulation shows the loop is **execution-bound, not memory-bound**
+(D1 read-miss 0.008 %), with the fast path taken every iteration: ~52 instr per
+malloc, ~57 per free — roughly 2× mimalloc's fast path, spread evenly with no
+single hotspot. Turning each suspect off (64 B churn, best-of-5 ns/op):
+
+| config | ns/op | vs default |
+| --- | --- | --- |
+| default (partitioning + hardening, rcache resolve) | 6.54 | — |
+| hardening off (`BTM_HARDENING=OFF`) | 6.30 | −0.24 (≈4 %) |
+| partitioning off (`BTM_PARTITIONING=OFF`) | 6.10 | −0.44 (≈7 %) |
+| free resolve: trusting masked-magic (`BTM_TRUST_FREE=1`, prototype) | 6.31 | −0.23 |
+| partitioning off **and** trust-free | **3.99** | −2.55 (≈39 %) |
+
+Two lessons. (1) No single feature is the gap — hardening, the return-address
+hash, and the owner-resolve each cost only a few percent. (2) The last row is
+strongly **non-additive**: removing the hash *and* the atomic acquire-load in
+`btm_resolve_owner` together unlocks ~2.5 ns the two can't individually,
+because both act as compiler reordering barriers — once gone, the tight
+alloc-then-free-same-slot loop collapses. That 3.99 ns therefore overstates the
+real-world floor (production code separates alloc and free), but flags the
+atomic acquire-load as the next lever to investigate.
+
+Crucially, **every microbenchmark here allocates from a single call site**, so
+all objects land in one partition whether or not partitioning is compiled in —
+the benchmarks under-show partitioning's payoff (pool-lock spreading and
+call-site RSS cohorting, which need call-site *diversity*, as in the real
+LD_PRELOAD runs) and over-show its cost. `BTM_PARTITIONING=OFF` is the right
+build for workloads that don't need call-site segregation; it keeps the
+home-pool cross-thread-free model (btmalloc's actual scaling advantage over
+per-arena allocators) while dropping the hash. Note `prodcons` is also slightly
+faster with partitioning off, for the same single-call-site reason.
+
 ## Phase H — out-of-line slab metadata (and its RSS payoff)
 
 Slab descriptors were moved out of the data region into a per-chunk descriptor

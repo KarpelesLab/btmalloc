@@ -69,6 +69,7 @@ io_uring (5.x+; tested on 6.12).
 | `BTM_BUILD_BENCH` | `OFF` | Build the benchmarks under `bench/` |
 | `BTM_OVERRIDE_LIBC` | `ON` | Compile libc symbol overrides into the shared lib |
 | `BTM_HARDENING` | `ON` | Freelist safe-linking + double-free detection. Off = plain freelists (≈3-4% faster churn, no overflow/double-free protection) |
+| `BTM_PARTITIONING` | `ON` | Call-site (return-address) partitioning — the defining feature. Off = a single partition (ordinary per-size-class allocator): no return-address hash, ≈7-10% faster small churn, but no call-site segregation, RSS cohorting, or `intern`/profiling. `BTM_PARTITIONS`/`BTM_PARTITION_MODE` become no-ops |
 | `BTM_ASAN` | `OFF` | Build with AddressSanitizer (forces `BTM_OVERRIDE_LIBC=OFF`) |
 
 ### Runtime knobs

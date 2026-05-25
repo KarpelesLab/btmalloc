@@ -95,6 +95,7 @@ done:
     return part;
 }
 
+#if BTM_PARTITIONING
 static unsigned read_nparts_env(void) {
     unsigned p = 64; /* default */
     const char *e = getenv("BTM_PARTITIONS");
@@ -107,6 +108,7 @@ static unsigned read_nparts_env(void) {
     if (np > 4096) np = 4096;
     return np;
 }
+#endif
 
 /* Child-side fork handler: only the forking thread exists in the child, so any
  * pool lock held by another thread is orphaned. Reinitialize all locks (safe:
@@ -132,7 +134,11 @@ static void btm_do_init(void) {
     btm_fl_key |= 1; /* never zero */
 #endif
 
+#if BTM_PARTITIONING
     unsigned np = read_nparts_env();
+#else
+    unsigned np = 1; /* partitioning compiled out: one shared partition */
+#endif
     size_t bytes = (size_t)np * sizeof(btm_partition_t);
     btm_partition_t *parts = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
                                   MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
@@ -164,6 +170,7 @@ static void btm_do_init(void) {
     }
 #endif
 
+#if BTM_PARTITIONING
     const char *mode = getenv("BTM_PARTITION_MODE");
     if (mode && (mode[0] == 'i' || mode[0] == 'I')) { /* "intern" */
         unsigned cap = 1;
@@ -179,6 +186,7 @@ static void btm_do_init(void) {
             intern_tbl = NULL;
         }
     }
+#endif
 
     pthread_atfork(NULL, NULL, btm_atfork_child);
     atomic_store_explicit(&btm_ready, 1, memory_order_release);

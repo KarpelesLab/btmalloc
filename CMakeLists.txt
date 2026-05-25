@@ -28,6 +28,7 @@ option(BTM_OVERRIDE_LIBC  "Override libc malloc symbols (M3+)"      ON)
 option(BTM_DEBUG_FILL     "Fill freed memory with 0xDF (debug aid)" OFF)
 option(BTM_ASAN           "Build with AddressSanitizer"             OFF)
 option(BTM_HARDENING      "Freelist safe-linking + double-free detection" ON)
+option(BTM_PARTITIONING   "Call-site (return-address) partitioning"       ON)
 
 # ASan ships its own malloc; can't sensibly coexist with our overrides.
 if(BTM_ASAN AND BTM_OVERRIDE_LIBC)
@@ -49,6 +50,14 @@ if(BTM_HARDENING)
     add_compile_definitions(BTM_HARDENING=1)
 else()
     add_compile_definitions(BTM_HARDENING=0)
+endif()
+
+# Call-site partitioning on/off (the defining feature). Off = single partition,
+# i.e. an ordinary per-size-class allocator with no return-address hash.
+if(BTM_PARTITIONING)
+    add_compile_definitions(BTM_PARTITIONING=1)
+else()
+    add_compile_definitions(BTM_PARTITIONING=0)
 endif()
 
 # Per-config flags.
@@ -138,3 +147,4 @@ message(STATUS "  BTM_OVERRIDE_LIBC    = ${BTM_OVERRIDE_LIBC}")
 message(STATUS "  BTM_DEBUG_FILL       = ${BTM_DEBUG_FILL}")
 message(STATUS "  BTM_ASAN             = ${BTM_ASAN}")
 message(STATUS "  BTM_HARDENING        = ${BTM_HARDENING}")
+message(STATUS "  BTM_PARTITIONING     = ${BTM_PARTITIONING}")
