@@ -146,6 +146,20 @@ link, not the raw next address; round-trip correctness is covered by the
 millions-of-ops shadow-map stress test running with safe-linking active; ASan
 clean; git/python/bash run under LD_PRELOAD.
 
+`BTM_HARDEN=1` additionally enables **double-free detection**: a freed slot
+stamps a key-derived canary (cleared on reallocation); freeing a slot that
+still carries it is a consecutive double-free, which aborts with **call-site
+forensics** — the report names the call site feeding the corrupted slab's
+partition (unique to PC anchoring). Cost ~0.8 ns/op (opt-in; default path
+untouched). `test_doublefree` confirms detection (child aborts on SIGABRT) and
+no false positives on legitimate churn.
+
+(Building the double-free path surfaced and fixed a latent correctness bug: the
+size-class lookup table was read before lazy init had built it, so the very
+first allocation of a process returned a 16-byte slot regardless of requested
+size — a heap overflow for any first allocation > 16 B. The table is now a
+compile-time constant, valid before any init.)
+
 ## Phase H — out-of-line slab metadata (and its RSS payoff)
 
 Slab descriptors were moved out of the data region into a per-chunk descriptor

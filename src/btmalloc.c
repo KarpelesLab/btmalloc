@@ -31,7 +31,8 @@ unsigned         btm_nparts = 1;
 _Atomic(int)     btm_ready;
 int              btm_intern_mode;
 int              btm_mesh_mode;
-uintptr_t        btm_fl_key; /* freelist safe-linking secret */
+int              btm_harden_mode; /* BTM_HARDEN=1: double-free detection */
+uintptr_t        btm_fl_key;      /* freelist safe-linking secret */
 
 static pthread_once_t btm_init_once = PTHREAD_ONCE_INIT;
 
@@ -151,6 +152,11 @@ static void btm_do_init(void) {
     }
 
     /* Optional deterministic call-site -> partition interning. */
+    {
+        const char *h = getenv("BTM_HARDEN");
+        if (h && h[0] == '1') btm_harden_mode = 1;
+    }
+
     const char *mode = getenv("BTM_PARTITION_MODE");
     if (mode && (mode[0] == 'i' || mode[0] == 'I')) { /* "intern" */
         unsigned cap = 1;
@@ -201,6 +207,7 @@ void *btm_malloc_at(size_t size, void *ra) {
     if (BTM_LIKELY(p != NULL)) {
         bin->free_head = btm_fl_get(p);
         bin->count--;
+        if (BTM_UNLIKELY(btm_harden_mode)) ((uintptr_t *)p)[1] = 0; /* clear canary */
         return p;
     }
 
@@ -211,7 +218,29 @@ void *btm_malloc_at(size_t size, void *ra) {
         btm_partitions[part].sample_ra = ra;
     unsigned want = btm_cache_max(sc) / 2;
     if (want < 1) want = 1;
-    return btm_pool_refill(&btm_partitions[part], sc, bin, want);
+    p = btm_pool_refill(&btm_partitions[part], sc, bin, want);
+    if (BTM_UNLIKELY(btm_harden_mode) && p) ((uintptr_t *)p)[1] = 0;
+    return p;
+}
+
+/* Report a detected double-free, attributing it to the call site that fed the
+ * containing slab's partition, then abort. */
+__attribute__((noinline))
+static void btm_double_free(void *ptr, btm_slab_t *slab) {
+    void *ra = btm_partitions[slab->part_idx].sample_ra;
+    const char *sym = "?", *lib = "";
+    Dl_info info;
+    if (ra && dladdr(ra, &info)) {
+        if (info.dli_sname) sym = info.dli_sname;
+        if (info.dli_fname) lib = info.dli_fname;
+    }
+    char line[256];
+    int n = snprintf(line, sizeof line,
+                     "btmalloc: double free of %p (size class %u bytes); "
+                     "slab's partition is fed by ~%s (%p in %s)\n",
+                     ptr, (unsigned)btm_sc_to_size[slab->sc], sym, ra, lib);
+    if (n > 0) { ssize_t w = write(2, line, (size_t)n); (void)w; }
+    abort();
 }
 
 void btm_free(void *ptr) {
@@ -238,11 +267,18 @@ void btm_free(void *ptr) {
         t = btm_tls_get();
         if (!t) { btm_pool_free_one(slab, ptr); return; }
     }
+    if (BTM_UNLIKELY(btm_harden_mode)) {
+        /* Detect a (consecutive) double-free: the slot still carries the canary
+         * stamped at its last free and not yet cleared by a reallocation. */
+        if (((uintptr_t *)ptr)[1] == btm_df_canary(ptr)) btm_double_free(ptr, slab);
+    }
+
     btm_tls_bin_t *bin = btm_tls_bin_at(t, pidx, sc);
     bin->pool = c->pool; /* the chunk's pool is exactly (pidx, sc)'s pool */
     btm_fl_set(ptr, bin->free_head);
     bin->free_head = ptr;
     bin->count++;
+    if (BTM_UNLIKELY(btm_harden_mode)) ((uintptr_t *)ptr)[1] = btm_df_canary(ptr);
     unsigned cap = btm_cache_max(sc);
     if (BTM_UNLIKELY(bin->count > cap)) btm_pool_flush(bin, cap / 2);
 }

@@ -59,6 +59,16 @@ static inline void btm_fl_set(void *slot, void *next) {
                          ((uintptr_t)slot >> BTM_PAGE_SHIFT);
 }
 
+/* ---- double-free detection (opt-in, BTM_HARDEN=1) ----
+ * A freed slot stamps a key-derived canary into its second word; the canary is
+ * cleared when the slot is handed back out. Freeing a slot whose canary is
+ * still present is a (consecutive) double-free. All size classes are >= 16 B,
+ * so the second word is always inside the slot. */
+extern int btm_harden_mode;
+static inline uintptr_t btm_df_canary(const void *slot) {
+    return (uintptr_t)slot ^ btm_fl_key ^ (uintptr_t)0xD0FF1EE5DEADC0DEULL;
+}
+
 /* ---- Forward decls ---- */
 struct btm_partition;
 typedef struct btm_partition btm_partition_t;
@@ -187,7 +197,7 @@ unsigned                btm_intern_slow(void *ra) BTM_HIDDEN;
 #define BTM_SC_LUT_ENTRIES (BTM_SMALL_MAX_SIZE / 16) /* 1024 */
 extern const uint32_t btm_sc_to_size[BTM_NUM_SIZE_CLASSES] BTM_HIDDEN;
 extern const uint16_t btm_sc_run_pages[BTM_NUM_SIZE_CLASSES] BTM_HIDDEN;
-extern uint8_t        btm_sc_lut[BTM_SC_LUT_ENTRIES] BTM_HIDDEN;
+extern const uint8_t  btm_sc_lut[BTM_SC_LUT_ENTRIES] BTM_HIDDEN;
 void btm_size_class_init(void) BTM_HIDDEN;        /* builds the lookup table */
 
 /* Smallest size class fitting `size`, or -1 if 0 or > SMALL_MAX. Hot path. */
