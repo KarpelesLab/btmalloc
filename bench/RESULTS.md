@@ -153,7 +153,28 @@ sparse live slabs) needs memfd-backed chunks + virtual remapping — future work
 Live-data hotness tiering (MADV_COLD on cold-but-live slabs) needs access
 sampling — also future work.
 
-## Takeaways for next phases
+## Phase E — LD_PRELOAD hardening
+
+`pthread_atfork` child handler (reinitializes pool locks and resets the
+background subsystem, since only the forking thread survives into the child);
+extra libc compatibility stubs (`cfree`, `malloc_trim`, `malloc_stats`); a
+CTest (`test_preload`) that runs real programs under the built `.so` and
+exercises fork+child allocation.
+
+Validated as a drop-in (LD_PRELOAD confirmed active via /proc/self/maps):
+`/bin/ls`, `/bin/bash`, `/usr/bin/find`, `grep`, **python3** (JSON + 8-thread
+workloads), **git**, **gcc** (compiling btmalloc's own sources), **perl**, and
+**parallel gcc** — all run cleanly. AddressSanitizer clean across the suite.
+
+Deferred (future work, with rationale): per-partition **adaptive size classes**
+would tune internal fragmentation to each call site's observed sizes, but
+require a per-partition size→class table on the hot path (replacing today's
+single shared table read) — a real throughput cost for a marginal frag gain,
+not justified while the design's headline wins (cross-thread free, RSS) are
+already demonstrated. True object-moving compaction (Mesh-style, memfd-backed)
+and live-data MADV_COLD tiering (access sampling) likewise remain future work.
+
+## Takeaways
 
 - **Win to defend:** cross-thread free / producer-consumer scaling.
 - **Gap to close:** single-thread small-object fast path (inline the bin

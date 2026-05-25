@@ -176,6 +176,8 @@ btm_chunk_t *btm_chunk_obtain(btm_scpool_t *pool) BTM_HIDDEN;
 /* Release a fully-drained chunk: queued for async MADV_DONTNEED and returned
  * to the warm pool (or trimmed to the OS), off the calling thread. */
 void        btm_chunk_dispose(btm_chunk_t *c) BTM_HIDDEN;
+/* Reset async/background state in a fork() child (no maintenance thread there). */
+void        btm_bg_atfork_child(void) BTM_HIDDEN;
 /* Register / unregister the 2 MiB regions [base, base+len) -> owner. */
 void        btm_registry_insert(uintptr_t base, size_t len, uintptr_t owner) BTM_HIDDEN;
 void        btm_registry_remove(uintptr_t base, size_t len) BTM_HIDDEN;

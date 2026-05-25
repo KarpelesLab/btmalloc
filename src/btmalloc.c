@@ -42,6 +42,16 @@ static unsigned read_nparts_env(void) {
     return np;
 }
 
+/* Child-side fork handler: only the forking thread exists in the child, so any
+ * pool lock held by another thread is orphaned. Reinitialize all locks (safe:
+ * the child is single-threaded here) and reset the background subsystem. */
+static void btm_atfork_child(void) {
+    for (unsigned i = 0; i < btm_nparts; i++)
+        for (int sc = 0; sc < BTM_NUM_SIZE_CLASSES; sc++)
+            pthread_mutex_init(&btm_partitions[i].pools[sc].lock, NULL);
+    btm_bg_atfork_child();
+}
+
 static void btm_do_init(void) {
     btm_size_class_init();
     btm_chunk_init();
@@ -62,6 +72,7 @@ static void btm_do_init(void) {
 
     btm_partitions = parts;
     btm_nparts = np;
+    pthread_atfork(NULL, NULL, btm_atfork_child);
     atomic_store_explicit(&btm_ready, 1, memory_order_release);
 }
 

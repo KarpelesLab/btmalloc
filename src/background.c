@@ -185,6 +185,20 @@ static void bg_kick(void) {
     pthread_mutex_unlock(&bg_start_lock);
 }
 
+/* After fork(), only the calling thread survives into the child: the
+ * maintenance thread is gone and bg_lock may be held by a thread that no longer
+ * exists. Reset the async state so the child starts a fresh thread on demand;
+ * the warm pool's chunks remain valid (COW) and are kept. */
+void btm_bg_atfork_child(void) {
+    pthread_mutex_init(&bg_lock, NULL);
+    pthread_mutex_init(&bg_start_lock, NULL);
+    pthread_cond_init(&bg_cv, NULL);
+    dispose_head = NULL;
+    bg_async = 0;
+    bg_ring_ok = 0; /* the parent's io_uring ring is not usable in the child */
+    atomic_store_explicit(&bg_started, 0, memory_order_release);
+}
+
 /* ---- public obtain / dispose ---- */
 
 btm_chunk_t *btm_chunk_obtain(btm_scpool_t *pool) {

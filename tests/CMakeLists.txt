@@ -12,3 +12,13 @@ endfunction()
 
 btm_add_test(test_basic)
 btm_add_test(test_stress)
+
+# Preload test needs the shared library path at runtime. Only meaningful when
+# the shared lib actually overrides libc malloc (not under ASan, which provides
+# its own allocator and builds an ASan-runtime-dependent .so).
+if(BTM_OVERRIDE_LIBC)
+    add_executable(test_preload test_preload.c)
+    target_link_libraries(test_preload PRIVATE btmalloc_static)
+    target_include_directories(test_preload PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    add_test(NAME test_preload COMMAND test_preload $<TARGET_FILE:btmalloc>)
+endif()

@@ -184,7 +184,10 @@ measured delta, not a guess.
   fragmenting churn drops to ~72 MB steady / 60 MB drained vs glibc 190 /
   jemalloc 203 — ~2.7× less. (Object-moving compaction + live-data MADV_COLD
   tiering remain future work — see bench/RESULTS.md.)
-- **Phase E** — adaptive size classes + LD_PRELOAD hardening.
+- **Phase E** ✔ — LD_PRELOAD hardening: pthread_atfork child handler, extra
+  libc stubs, real-program validation (python/git/gcc/perl/threaded). Adaptive
+  size classes deferred (per-partition size tables would tax the hot path for a
+  marginal frag gain) — see bench/RESULTS.md.
 
 Each phase ends with a green build, passing tests, refreshed benchmark numbers,
 and a commit pushed to `master`.

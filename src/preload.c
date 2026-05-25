@@ -68,5 +68,12 @@ BTM_EXPORT size_t malloc_usable_size(void *ptr) {
     return btm_malloc_usable_size(ptr);
 }
 
-/* Tuning/introspection no-ops so programs that call them keep running. */
+/* Obsolete SunOS-era free alias still emitted by some toolchains. */
+BTM_EXPORT void cfree(void *ptr) { btm_free(ptr); }
+
+/* Tuning/introspection no-ops so programs that call them keep running. We do
+ * not honor the parameters yet; returning benign values is enough to avoid
+ * surprising callers. */
 BTM_EXPORT int mallopt(int param, int value) { (void)param; (void)value; return 1; }
+BTM_EXPORT int malloc_trim(size_t pad) { (void)pad; return 0; }
+BTM_EXPORT void malloc_stats(void) {}
