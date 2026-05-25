@@ -63,17 +63,28 @@ if(BTM_ASAN)
     add_link_options(-fsanitize=address)
 endif()
 
-set(BTMALLOC_SOURCES
+# Core allocator sources, shared by both library flavors. The LD_PRELOAD
+# symbol overrides (src/preload.c) are deliberately NOT here — they go only
+# into the shared library, so the static library the tests link against does
+# not hijack libc malloc inside the test process.
+set(BTMALLOC_CORE_SOURCES
     src/btmalloc.c
 )
 
-# LD_PRELOAD shim — landed for real in M3; currently absent.
+# Compile the core once as position-independent objects, reused by both libs.
+add_library(btmalloc_objs OBJECT ${BTMALLOC_CORE_SOURCES})
+target_include_directories(btmalloc_objs PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+set_target_properties(btmalloc_objs PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# Shared library — the primary deliverable + LD_PRELOAD drop-in.
+set(BTMALLOC_SHARED_SOURCES $<TARGET_OBJECTS:btmalloc_objs>)
 if(BTM_OVERRIDE_LIBC AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/preload.c")
-    list(APPEND BTMALLOC_SOURCES src/preload.c)
+    list(APPEND BTMALLOC_SHARED_SOURCES src/preload.c)
 endif()
 
-# Shared library — the primary deliverable.
-add_library(btmalloc SHARED ${BTMALLOC_SOURCES})
+add_library(btmalloc SHARED ${BTMALLOC_SHARED_SOURCES})
 target_include_directories(btmalloc PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
@@ -84,9 +95,8 @@ set_target_properties(btmalloc PROPERTIES
     VERSION   ${PROJECT_VERSION}
 )
 
-# Static library — used by tests so they exercise the implementation
-# directly without dlopen-time gymnastics.
-add_library(btmalloc_static STATIC ${BTMALLOC_SOURCES})
+# Static library — used by tests so they exercise the implementation directly.
+add_library(btmalloc_static STATIC $<TARGET_OBJECTS:btmalloc_objs>)
 target_include_directories(btmalloc_static PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
