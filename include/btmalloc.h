@@ -81,6 +81,14 @@ void *btm_aligned_alloc(size_t alignment, size_t size);
 BTM_API
 size_t btm_malloc_usable_size(const void *ptr);
 
+/* Writes a heap profile to file descriptor `fd`: one line per partition that
+ * holds memory, with the bytes outstanding and a representative call site
+ * (symbolized via dladdr when possible). Because btmalloc groups allocations
+ * by call site, this attributes live memory to where it was allocated — a
+ * zero-instrumentation heap profiler. Safe to call at any time. */
+BTM_API
+void btm_heap_profile(int fd);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

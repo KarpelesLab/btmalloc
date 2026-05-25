@@ -100,9 +100,13 @@ struct btm_scpool {
     btm_chunk_t    *chunks;      /* doubly-linked list of this pool's chunks */
     btm_chunk_t    *active;      /* current carving chunk */
     uint64_t        nslabs;
+    uint64_t        outstanding; /* slots handed out (in TLS caches or in use);
+                                  * maintained in slow paths only, for profiling */
 };
 
 struct btm_partition {
+    void        *sample_ra; /* a representative call site that uses this
+                             * partition, recorded on first refill (profiling) */
     btm_scpool_t pools[BTM_NUM_SIZE_CLASSES];
 };
 

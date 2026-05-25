@@ -76,4 +76,5 @@ BTM_EXPORT void cfree(void *ptr) { btm_free(ptr); }
  * surprising callers. */
 BTM_EXPORT int mallopt(int param, int value) { (void)param; (void)value; return 1; }
 BTM_EXPORT int malloc_trim(size_t pad) { (void)pad; return 0; }
-BTM_EXPORT void malloc_stats(void) {}
+/* glibc's malloc_stats() prints to stderr; route it to our heap profile. */
+BTM_EXPORT void malloc_stats(void) { btm_heap_profile(2); }

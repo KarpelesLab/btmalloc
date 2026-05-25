@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define CHECK(expr) do { \
     if (!(expr)) { \
@@ -192,6 +193,27 @@ static void test_many_small(void) {
     PASS("many_small");
 }
 
+static void test_heap_profile(void) {
+    /* Allocate from this call site, then check the profiler emits a report. */
+    void *keep[64];
+    for (int i = 0; i < 64; i++) keep[i] = btm_malloc(200);
+
+    int fds[2];
+    CHECK(pipe(fds) == 0);
+    btm_heap_profile(fds[1]);
+    close(fds[1]);
+
+    char buf[4096];
+    ssize_t n = read(fds[0], buf, sizeof buf - 1);
+    close(fds[0]);
+    CHECK(n > 0);
+    buf[n] = '\0';
+    CHECK(strstr(buf, "btmalloc heap profile") != NULL);
+
+    for (int i = 0; i < 64; i++) btm_free(keep[i]);
+    PASS("heap_profile");
+}
+
 int main(void) {
     test_malloc_free_basic();
     test_malloc_zero();
@@ -207,6 +229,7 @@ int main(void) {
     test_reallocarray_overflow();
     test_usable_size();
     test_many_small();
+    test_heap_profile();
     puts("all tests passed");
     return 0;
 }

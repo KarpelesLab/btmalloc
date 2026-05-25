@@ -15,7 +15,9 @@
 
 #include "internal.h"
 
+#include <dlfcn.h>
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -110,6 +112,10 @@ void *btm_malloc_at(size_t size, void *ra) {
     }
 
     bin->pool = &btm_partitions[part].pools[sc]; /* ensure flush can find it */
+    /* Record a representative call site for this partition (profiling). Only on
+     * the refill path, so the fast path stays untouched. */
+    if (BTM_UNLIKELY(btm_partitions[part].sample_ra == NULL))
+        btm_partitions[part].sample_ra = ra;
     unsigned want = btm_cache_max(sc) / 2;
     if (want < 1) want = 1;
     return btm_pool_refill(&btm_partitions[part], sc, bin, want);
@@ -255,4 +261,43 @@ size_t btm_malloc_usable_size(const void *ptr) {
         return btm_sc_to_size[slab->sc];
     }
     return btm_large_usable_size(owner & ~(uintptr_t)1, ptr);
+}
+
+void btm_heap_profile(int fd) {
+    if (!atomic_load_explicit(&btm_ready, memory_order_acquire)) return;
+
+    char line[256];
+    int n = snprintf(line, sizeof line,
+                     "btmalloc heap profile (P=%u partitions)\n"
+                     "%-6s %14s  call site\n",
+                     btm_nparts, "part", "bytes_outstanding");
+    if (n > 0) { ssize_t w = write(fd, line, (size_t)n); (void)w; }
+
+    uint64_t total = 0;
+    for (unsigned i = 0; i < btm_nparts; i++) {
+        uint64_t bytes = 0;
+        for (int sc = 0; sc < BTM_NUM_SIZE_CLASSES; sc++) {
+            /* Aligned 64-bit read; a slightly stale value is fine for a
+             * profiler, so no lock is taken. */
+            bytes += btm_partitions[i].pools[sc].outstanding *
+                     (uint64_t)btm_sc_to_size[sc];
+        }
+        if (bytes == 0) continue;
+        total += bytes;
+
+        const char *sym = "?", *lib = "";
+        void *ra = btm_partitions[i].sample_ra;
+        Dl_info info;
+        if (ra && dladdr(ra, &info)) {
+            if (info.dli_sname) sym = info.dli_sname;
+            if (info.dli_fname) lib = info.dli_fname;
+        }
+        n = snprintf(line, sizeof line, "%-6u %14llu  ~%s (%p in %s)\n",
+                     i, (unsigned long long)bytes, sym, ra, lib);
+        if (n > 0) { ssize_t w = write(fd, line, (size_t)n); (void)w; }
+    }
+
+    n = snprintf(line, sizeof line, "total outstanding (small): %llu bytes\n",
+                 (unsigned long long)total);
+    if (n > 0) { ssize_t w = write(fd, line, (size_t)n); (void)w; }
 }

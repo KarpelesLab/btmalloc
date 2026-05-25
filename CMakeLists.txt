@@ -98,7 +98,7 @@ add_library(btmalloc SHARED ${BTMALLOC_SHARED_SOURCES})
 target_include_directories(btmalloc PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-target_link_libraries(btmalloc PUBLIC pthread ${URING_LIB})
+target_link_libraries(btmalloc PUBLIC pthread ${URING_LIB} ${CMAKE_DL_LIBS})
 set_target_properties(btmalloc PROPERTIES
     OUTPUT_NAME btmalloc
     SOVERSION ${PROJECT_VERSION_MAJOR}
@@ -110,7 +110,7 @@ add_library(btmalloc_static STATIC $<TARGET_OBJECTS:btmalloc_objs>)
 target_include_directories(btmalloc_static PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-target_link_libraries(btmalloc_static PUBLIC pthread ${URING_LIB})
+target_link_libraries(btmalloc_static PUBLIC pthread ${URING_LIB} ${CMAKE_DL_LIBS})
 set_target_properties(btmalloc_static PROPERTIES OUTPUT_NAME btmalloc)
 
 if(BTM_BUILD_TESTS)

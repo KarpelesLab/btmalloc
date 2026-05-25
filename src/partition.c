@@ -209,6 +209,7 @@ void *btm_pool_refill(btm_partition_t *part, int sc, btm_tls_bin_t *bin,
         n++;
     }
     slab->free_count -= n;
+    pool->outstanding += n; /* these slots leave the pool (cache or in use) */
     if (slab->free_count == 0) partial_remove(pool, slab);
     pthread_mutex_unlock(&pool->lock);
 
@@ -236,6 +237,7 @@ void btm_pool_flush(btm_tls_bin_t *bin, unsigned keep) {
         void *s = bin->free_head;
         bin->free_head = *(void **)s;
         bin->count--;
+        pool->outstanding--; /* returning a slot to the pool */
 
         btm_chunk_t *c = chunk_of(s);
         btm_slab_t *slab = btm_slab_of(c, s);
@@ -257,6 +259,7 @@ void btm_pool_free_one(btm_slab_t *slab, void *ptr) {
     *(void **)ptr = slab->free_head;
     slab->free_head = ptr;
     slab->free_count++;
+    if (pool->outstanding) pool->outstanding--;
     if (slab->free_count == slab->nslots) {
         slab_became_free(pool, slab);
     } else if (!slab->in_partial) {

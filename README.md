@@ -80,6 +80,34 @@ Or as a drop-in:
 LD_PRELOAD=$PWD/build/libbtmalloc.so your-program
 ```
 
+### Call-site heap profiling (free, zero-instrumentation)
+
+Because btmalloc groups allocations by call site, it can attribute live memory
+to *where it was allocated* with no hooks or recompilation:
+
+```c
+btm_heap_profile(2);   /* write a per-call-site report to stderr (fd 2) */
+```
+
+Under `LD_PRELOAD`, the standard `malloc_stats()` triggers the same report, so
+you can profile any program:
+
+```c
+/* from anywhere in the target, e.g. a signal handler or debugger call */
+malloc_stats();
+```
+
+Output attributes outstanding bytes to symbolized call sites:
+
+```
+part   bytes_outstanding  call site
+31           26618048  ~PyThread_allocate_lock (0x... in libpython3.13.so)
+24              52224  ~? (0x... in libpython3.13.so)
+...
+```
+
+Raise `BTM_PARTITIONS` for finer attribution.
+
 ## Benchmarking
 
 ```sh
