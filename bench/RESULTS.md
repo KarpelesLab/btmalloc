@@ -413,6 +413,28 @@ objects verified byte-intact afterward (they fault back) and the hot set
 untouched. Works in default and mesh modes; requires swap to reduce RSS (the
 mechanism + safety hold regardless). No throughput regression (churn ~6.7 ns).
 
+## Fuzzing
+
+`tests/fuzz_alloc.c` interprets bytes as a program of allocator operations
+(malloc/calloc/realloc/aligned_alloc/free/verify) against a shadow oracle: each
+live allocation carries a unique 32-bit tag written into it (plus a derived
+fill), re-checked on free, on realloc, and on verify passes. A tag/fill
+mismatch means the allocator returned overlapping/aliased memory or corrupted a
+live object — the failure modes that matter most. Alignment, usable_size >=
+requested, and calloc-zeroing are checked inline.
+
+- **Coverage-guided** (`tools/fuzz.sh [secs] [mode]`): clang libFuzzer + ASan,
+  compiling the core (no preload — it would collide with ASan's malloc) plus
+  the harness. Ran clean across all four modes with no crashes and no ASan
+  reports: default 160,906 runs, intern 122,614, harden 119,684, mesh 107,769
+  (~1,800 exec/s; 239 coverage edges in default).
+- **Standalone** (CI smoke): the same harness with a PRNG-driven `main`, wired
+  into CTest as `fuzz_default` / `fuzz_intern` / `fuzz_mesh` / `fuzz_harden`
+  (also replays crash files as arguments). Runs without clang/libFuzzer.
+
+The first thing it caught was a bug in the *oracle* (a realloc check that
+ignored the tag bytes), not the allocator; once fixed, the allocator is clean.
+
 ## Takeaways
 
 - **Win to defend:** cross-thread free / producer-consumer scaling.
