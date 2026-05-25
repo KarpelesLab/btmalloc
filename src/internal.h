@@ -145,7 +145,15 @@ typedef struct btm_tls {
 extern btm_partition_t *btm_partitions BTM_HIDDEN;
 extern unsigned         btm_nparts BTM_HIDDEN;          /* power of two */
 extern _Atomic(int)     btm_ready BTM_HIDDEN;
+extern int              btm_intern_mode BTM_HIDDEN;     /* 1 = deterministic */
 void                    btm_ensure_init(void) BTM_HIDDEN;
+/* Deterministic call-site -> partition interning (BTM_PARTITION_MODE=intern):
+ * each distinct return address gets its own partition until P is exhausted.
+ * The per-thread one-entry cache is read inline below; the slow path (cold
+ * call site) goes through the global table. */
+extern _Thread_local void     *btm_tls_intern_ra;
+extern _Thread_local unsigned  btm_tls_intern_part;
+unsigned                btm_intern_slow(void *ra) BTM_HIDDEN;
 
 /* ---- size_class.c ---- */
 #define BTM_SC_LUT_ENTRIES (BTM_SMALL_MAX_SIZE / 16) /* 1024 */
@@ -242,8 +250,14 @@ void *btm_malloc_at(size_t size, void *ra) BTM_HIDDEN;
 void *btm_calloc_at(size_t n, size_t size, void *ra) BTM_HIDDEN;
 void *btm_realloc_at(void *ptr, size_t size, void *ra) BTM_HIDDEN;
 
-/* Partition selector: hash the return address. */
+/* Partition selector. Default: hash the return address (statistical
+ * segregation, collisions possible from the start). Intern mode: a stable
+ * unique partition per distinct call site (deterministic segregation). */
 static inline unsigned btm_partition_of(void *ra) {
+    if (btm_intern_mode) {
+        if (BTM_LIKELY(ra == btm_tls_intern_ra)) return btm_tls_intern_part;
+        return btm_intern_slow(ra);
+    }
     uintptr_t x = (uintptr_t)ra;
     x ^= x >> 33;
     x *= 0xff51afd7ed558ccdULL;

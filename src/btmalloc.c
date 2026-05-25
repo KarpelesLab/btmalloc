@@ -28,8 +28,65 @@
 btm_partition_t *btm_partitions;
 unsigned         btm_nparts = 1;
 _Atomic(int)     btm_ready;
+int              btm_intern_mode;
 
 static pthread_once_t btm_init_once = PTHREAD_ONCE_INIT;
+
+/* ---- call-site interning (deterministic partition assignment) ---- *
+ *
+ * Open-addressing table mapping a return address to a monotonically assigned
+ * id; partition = id mod nparts. Distinct call sites therefore get distinct
+ * partitions until nparts is exhausted, after which they wrap and share. A
+ * per-thread one-entry cache keeps the common (repeated call site) case to a
+ * compare, so the global table is touched only on cold sites. */
+typedef struct {
+    _Atomic(uintptr_t) ra;
+    unsigned           id;
+} btm_intern_ent_t;
+
+static btm_intern_ent_t *intern_tbl;
+static unsigned          intern_cap;       /* power of two */
+static _Atomic(unsigned) intern_next;      /* next id to assign */
+static pthread_mutex_t   intern_lock = PTHREAD_MUTEX_INITIALIZER;
+
+_Thread_local void    *btm_tls_intern_ra;
+_Thread_local unsigned btm_tls_intern_part;
+
+unsigned btm_intern_slow(void *ra) {
+    uintptr_t key = (uintptr_t)ra;
+    uintptr_t h = (key >> 4) * 0x9E3779B97F4A7C15ULL;
+    unsigned mask = intern_cap - 1;
+    unsigned i = (unsigned)(h >> 40) & mask;
+    unsigned part;
+
+    for (unsigned probe = 0; probe < intern_cap; probe++) {
+        uintptr_t e = atomic_load_explicit(&intern_tbl[i].ra, memory_order_acquire);
+        if (e == key) { part = intern_tbl[i].id & (btm_nparts - 1); goto done; }
+        if (e == 0) {
+            /* Empty slot: claim it under the lock (cold path, rare). */
+            pthread_mutex_lock(&intern_lock);
+            e = atomic_load_explicit(&intern_tbl[i].ra, memory_order_acquire);
+            if (e == 0) {
+                unsigned id = atomic_fetch_add_explicit(&intern_next, 1,
+                                                        memory_order_relaxed);
+                intern_tbl[i].id = id;
+                atomic_store_explicit(&intern_tbl[i].ra, key, memory_order_release);
+                pthread_mutex_unlock(&intern_lock);
+                part = id & (btm_nparts - 1);
+                goto done;
+            }
+            pthread_mutex_unlock(&intern_lock);
+            if (e == key) { part = intern_tbl[i].id & (btm_nparts - 1); goto done; }
+        }
+        i = (i + 1) & mask;
+    }
+    /* Table full (more call sites than capacity): fall back to hashing. */
+    part = (unsigned)(h >> 40) & (btm_nparts - 1);
+done:
+    btm_tls_intern_ra = ra;
+    btm_tls_intern_part = part;
+    return part;
+}
 
 static unsigned read_nparts_env(void) {
     unsigned p = 64; /* default */
@@ -74,6 +131,24 @@ static void btm_do_init(void) {
 
     btm_partitions = parts;
     btm_nparts = np;
+
+    /* Optional deterministic call-site -> partition interning. */
+    const char *mode = getenv("BTM_PARTITION_MODE");
+    if (mode && (mode[0] == 'i' || mode[0] == 'I')) { /* "intern" */
+        unsigned cap = 1;
+        while (cap < np * 8u) cap <<= 1; /* room to keep probing cheap */
+        if (cap < 1024) cap = 1024;
+        intern_tbl = mmap(NULL, (size_t)cap * sizeof(btm_intern_ent_t),
+                          PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE,
+                          -1, 0);
+        if (intern_tbl != MAP_FAILED) {
+            intern_cap = cap;
+            btm_intern_mode = 1;
+        } else {
+            intern_tbl = NULL;
+        }
+    }
+
     pthread_atfork(NULL, NULL, btm_atfork_child);
     atomic_store_explicit(&btm_ready, 1, memory_order_release);
 }

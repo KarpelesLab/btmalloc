@@ -241,6 +241,32 @@ This is the trade-off profile of the design: wins on cross-thread free and
 post-burst memory return; roughly neutral-to-slightly-behind on single-thread
 throughput and peak footprint of a held working set.
 
+## Deterministic call-site interning (BTM_PARTITION_MODE=intern)
+
+Default partition selection is `hash(return_address) mod P` — statistical
+segregation, where distinct call sites can collide from the start. Intern mode
+assigns each distinct call site its own partition (until P is exhausted, then
+graceful wrap), giving *deterministic* per-call-site segregation: a freed slot
+is only ever reused by allocations from the same call site, until P fills.
+
+This is both a security property (the Cling/SeMalloc anti-type-confusion
+guarantee) and finer profiling. Measured trade-off (the survey notes prior work
+only reports the extremes):
+
+- **Segregation/profiling granularity** (python workload, P=64): intern
+  separates **54** distinct call-site groups vs hash's **37** (collisions);
+  scales further with P.
+- **Memory cost**: at P=256, intern ties hash (426 MB — fewer call sites than
+  partitions, so no extra spreading). At P=4096, intern is +14 MB (~3%) to give
+  each site its own partition — vs SeMalloc's reported 46–247%.
+- **Throughput**: intern adds ~2 ns/malloc (two TLS-cache loads + the mode
+  test) — 8.5 vs 6.6 ns churn. **Opt-in**: the default hash path is unchanged.
+
+So the design exposes a tunable knob from "fast, statistical segregation"
+(default) to "deterministic per-call-site segregation" (intern + large P) at a
+small, *measured* memory cost — the quantified trade-off curve prior work left
+implicit.
+
 ## Takeaways
 
 - **Win to defend:** cross-thread free / producer-consumer scaling.
