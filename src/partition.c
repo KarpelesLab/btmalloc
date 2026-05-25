@@ -16,9 +16,25 @@
 #include "internal.h"
 
 #include <string.h>
+#include <sys/mman.h>
+
+/* Keep a few committed empty slabs per pool for cheap recycling; decommit the
+ * rest (return their pages to the OS) to fight fragmentation pinning. */
+#define BTM_KEEP_WARM_EMPTY 2
 
 static inline btm_chunk_t *chunk_of(const void *p) {
     return (btm_chunk_t *)((uintptr_t)p & ~(BTM_CHUNK_SIZE - 1));
+}
+
+/* Release an empty slab's data pages (everything past its inline header page).
+ * Only possible for multi-page slabs; 1-page slabs share their page with the
+ * header and must wait for whole-chunk reclaim. */
+static void slab_decommit(btm_slab_t *slab) {
+    if (slab->npages >= 2 && !slab->decommitted) {
+        madvise((char *)slab + BTM_PAGE_SIZE,
+                (size_t)(slab->npages - 1) * BTM_PAGE_SIZE, MADV_DONTNEED);
+        slab->decommitted = 1;
+    }
 }
 
 /* ---- partial list (doubly-linked via next/prev) ---- */
@@ -72,11 +88,20 @@ static void slab_format(btm_slab_t *slab, btm_partition_t *part, int sc,
 btm_slab_t *btm_slab_new(btm_partition_t *part, int sc) {
     btm_scpool_t *pool = &part->pools[sc];
 
-    /* Reuse a fully-free slab if one is cached (its pages are already
-     * committed — cheapest path). */
-    if (pool->empty) {
-        btm_slab_t *s = pool->empty;
-        pool->empty = s->next;
+    /* Reuse a fully-free slab if one is cached. Prefer warm (pages still
+     * committed); fall back to cold (decommitted — slab_format re-touches the
+     * pages, faulting them back in). */
+    btm_slab_t *s = NULL;
+    if (pool->empty_warm) {
+        s = pool->empty_warm;
+        pool->empty_warm = s->next;
+        pool->warm_count--;
+    } else if (pool->empty_cold) {
+        s = pool->empty_cold;
+        pool->empty_cold = s->next;
+    }
+    if (s) {
+        s->decommitted = 0;
         slab_format(s, part, sc, s->npages);
         chunk_of(s)->live_slabs++;
         return s;
@@ -116,9 +141,14 @@ static void chunk_unlink(btm_scpool_t *pool, btm_chunk_t *c) {
     c->next = c->prev = NULL;
 }
 
-/* Drop every cached empty slab that lives in chunk `c` from pool->empty. */
+/* Drop every cached empty slab that lives in chunk `c` from both empty lists. */
 static void purge_empties_of_chunk(btm_scpool_t *pool, btm_chunk_t *c) {
-    btm_slab_t **pp = &pool->empty;
+    btm_slab_t **pp = &pool->empty_warm;
+    while (*pp) {
+        if (chunk_of(*pp) == c) { *pp = (*pp)->next; pool->warm_count--; }
+        else pp = &(*pp)->next;
+    }
+    pp = &pool->empty_cold;
     while (*pp) {
         if (chunk_of(*pp) == c) *pp = (*pp)->next;
         else pp = &(*pp)->next;
@@ -139,10 +169,18 @@ static void slab_became_free(btm_scpool_t *pool, btm_slab_t *slab) {
         if (c == pool->active) pool->active = NULL;
         chunk_unlink(pool, c);
         btm_chunk_dispose(c);
+    } else if (pool->warm_count < BTM_KEEP_WARM_EMPTY) {
+        /* Keep a few empties committed for cheap recycling. */
+        slab->next = pool->empty_warm;
+        pool->empty_warm = slab;
+        pool->warm_count++;
     } else {
-        /* Keep the slab around for cheap recycling (singly-linked). */
-        slab->next = pool->empty;
-        pool->empty = slab;
+        /* Beyond the warm budget: release the slab's pages to the OS and park
+         * it on the cold list. This is what drains a fragmented chunk's RSS
+         * without waiting for every survivor to die. */
+        slab_decommit(slab);
+        slab->next = pool->empty_cold;
+        pool->empty_cold = slab;
     }
 }
 

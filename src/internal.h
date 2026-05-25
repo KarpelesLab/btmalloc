@@ -82,7 +82,8 @@ struct btm_slab {
     uint16_t         sc;          /* size class index */
     uint16_t         npages;      /* pages spanned */
     uint8_t          in_partial;  /* on the pool's partial list? */
-    uint8_t          _pad[3];
+    uint8_t          decommitted; /* data pages released via MADV_DONTNEED? */
+    uint8_t          _pad[2];
 };
 
 /* ---- Size-class pool: per (partition, size_class) ----
@@ -92,10 +93,12 @@ struct btm_slab {
  * carved. */
 struct btm_scpool {
     pthread_mutex_t lock;
-    btm_slab_t     *partial;   /* doubly-linked, free_count in (0, nslots) */
-    btm_slab_t     *empty;     /* singly-linked via ->next, free_count==nslots */
-    btm_chunk_t    *chunks;    /* doubly-linked list of this pool's chunks */
-    btm_chunk_t    *active;    /* current carving chunk (never unmapped) */
+    btm_slab_t     *partial;     /* doubly-linked, free_count in (0, nslots) */
+    btm_slab_t     *empty_warm;  /* committed empty slabs, fast recycle (->next) */
+    btm_slab_t     *empty_cold;  /* decommitted empty slabs, re-fault on reuse */
+    uint32_t        warm_count;  /* length of empty_warm */
+    btm_chunk_t    *chunks;      /* doubly-linked list of this pool's chunks */
+    btm_chunk_t    *active;      /* current carving chunk */
     uint64_t        nslabs;
 };
 

@@ -126,6 +126,33 @@ doesn't touch. Flattening it is a refill-path optimization, separate from
 async backing. Async helps the *free* path (madvise offloaded) — not visible in
 a malloc-latency bench.
 
+## Phase D — empty-slab decommit (fragmentation RSS)
+
+When a slab empties but its chunk still has survivors, all but a few warm
+empties are decommitted (`MADV_DONTNEED` on their data pages) and parked on a
+cold list; reuse re-faults them. This releases the memory of empty slabs that
+whole-chunk reclaim could not, because one survivor pinned the chunk.
+
+### RSS over grow → churn → shrink → drain (MB, lower better)
+
+| alloc    | peak | shrunk | steady | drained |
+|----------|------|--------|--------|---------|
+| glibc    | 182  | 191    | 190    | 187     |
+| jemalloc | 187  | 203    | 203    | 203     |
+| btmalloc | 184  | **140**| **72** | **60**  |
+
+**btmalloc uses ~2.7× less resident memory than glibc/jemalloc** after a
+fragmenting churn — steady 72 MB vs ~190/203, drained 60 MB vs 187/203.
+Throughput unchanged (churn ~6.9 ns; producer/consumer still wins; local
+scaling unaffected).
+
+Scope: this is empty-slab decommit, not object-moving compaction. 1-page
+small-class slabs can't be decommitted individually (inline header shares the
+page) and still rely on whole-chunk reclaim. True Mesh-style compaction (merge
+sparse live slabs) needs memfd-backed chunks + virtual remapping — future work.
+Live-data hotness tiering (MADV_COLD on cold-but-live slabs) needs access
+sampling — also future work.
+
 ## Takeaways for next phases
 
 - **Win to defend:** cross-thread free / producer-consumer scaling.

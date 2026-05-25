@@ -179,7 +179,11 @@ measured delta, not a guess.
   releases pages via batched io_uring MADV_DONTNEED and pre-maps ahead of
   demand. RSS drained 136 MB (best of three); 2× faster than jemalloc on
   grow/free thrash. Malloc tail is refill-bound (separate optimization).
-- **Phase D** — hotness tracking + tiering + compaction.
+- **Phase D** ✔ — empty-slab decommit: empties beyond a small warm budget have
+  their pages released (MADV_DONTNEED) instead of pinning a chunk. RSS after a
+  fragmenting churn drops to ~72 MB steady / 60 MB drained vs glibc 190 /
+  jemalloc 203 — ~2.7× less. (Object-moving compaction + live-data MADV_COLD
+  tiering remain future work — see bench/RESULTS.md.)
 - **Phase E** — adaptive size classes + LD_PRELOAD hardening.
 
 Each phase ends with a green build, passing tests, refreshed benchmark numbers,
