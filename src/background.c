@@ -276,16 +276,25 @@ static void *bg_main(void *arg) {
     return NULL;
 }
 
-static void bg_kick(void) {
-    if (atomic_load_explicit(&bg_started, memory_order_acquire)) {
-        pthread_mutex_lock(&bg_lock);
-        pthread_cond_signal(&bg_cv);
-        pthread_mutex_unlock(&bg_lock);
+/* Wake the maintenance thread. Safe to call while holding a pool lock: the bg
+ * thread never acquires a pool lock, so there is no lock-order cycle, and this
+ * does not allocate. */
+static void bg_signal(void) {
+    pthread_mutex_lock(&bg_lock);
+    pthread_cond_signal(&bg_cv);
+    pthread_mutex_unlock(&bg_lock);
+}
+
+/* Start the maintenance thread, once. MUST be called with NO pool lock held:
+ * pthread_create allocates internally, which re-enters our malloc; if a pool
+ * lock were held that re-entry could self-deadlock on it. The bg_started flag
+ * is set before pthread_create so the re-entrant allocation skips this. */
+void btm_bg_ensure_started(void) {
+    if (BTM_LIKELY(atomic_load_explicit(&bg_started, memory_order_acquire)))
         return;
-    }
     pthread_mutex_lock(&bg_start_lock);
     if (!atomic_load_explicit(&bg_started, memory_order_acquire)) {
-        atomic_store_explicit(&bg_started, 1, memory_order_release); /* block re-entry */
+        atomic_store_explicit(&bg_started, 1, memory_order_release);
         if (!getenv("BTM_NO_ASYNC") &&
             pthread_create(&bg_thread, NULL, bg_main, NULL) == 0) {
             bg_async = 1;
@@ -346,7 +355,7 @@ btm_chunk_t *btm_chunk_obtain(btm_scpool_t *pool) {
 
     if (!c) c = map_fresh(); /* synchronous fallback when the pool is empty */
     if (!c) return NULL;
-    if (low) bg_kick();
+    if (low && bg_async) bg_signal(); /* ask the thread to refill (safe under lock) */
 
     chunk_init_header(c, pool);
     return c;
@@ -373,5 +382,6 @@ void btm_chunk_dispose(btm_chunk_t *c) {
         munmap(c, BTM_CHUNK_SIZE);
         if (btm_mesh_mode) memfd_free_off(off);
     }
-    bg_kick(); /* try to bring the maintenance thread up for next time */
+    /* The maintenance thread is started from the (lock-free) malloc path, not
+     * here, to avoid pthread_create under a pool lock. */
 }

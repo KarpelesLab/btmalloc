@@ -199,6 +199,9 @@ void *btm_malloc_at(size_t size, void *ra) {
         btm_ensure_init();
         t = btm_tls_get();
         if (!t) return NULL;
+        /* Start the maintenance thread here — no pool lock is held, so the
+         * allocations pthread_create makes can't deadlock on one. */
+        btm_bg_ensure_started();
     }
 
     unsigned part = btm_partition_of(ra);

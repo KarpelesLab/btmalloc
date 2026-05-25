@@ -34,10 +34,14 @@ mkdir -p "$results_dir"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 out="$results_dir/$stamp.csv"
 
-# Locate jemalloc.
+# Locate jemalloc / mimalloc (newest soname wins).
 jemalloc_so="${JEMALLOC_SO:-}"
 if [[ -z "$jemalloc_so" ]]; then
     jemalloc_so="$(ldconfig -p 2>/dev/null | awk '/libjemalloc\.so/{print $NF; exit}')" || true
+fi
+mimalloc_so="${MIMALLOC_SO:-}"
+if [[ -z "$mimalloc_so" ]]; then
+    mimalloc_so="$(ldconfig -p 2>/dev/null | awk '/libmimalloc\.so/{print $NF; exit}')" || true
 fi
 
 # Which allocators?
@@ -47,6 +51,7 @@ if [[ -n "${BENCH_ALLOCATORS:-}" ]]; then
 else
     allocs=(glibc)
     [[ -n "$jemalloc_so" && -e "$jemalloc_so" ]] && allocs+=(jemalloc)
+    [[ -n "$mimalloc_so" && -e "$mimalloc_so" ]] && allocs+=(mimalloc)
     [[ -e "$btmalloc_so" ]] && allocs+=(btmalloc)
 fi
 
@@ -71,6 +76,7 @@ preload_for() {
     case "$1" in
         glibc)    echo "" ;;
         jemalloc) echo "$jemalloc_so" ;;
+        mimalloc) echo "$mimalloc_so" ;;
         btmalloc) echo "$btmalloc_so" ;;
         *)        echo "" ;;
     esac
@@ -120,8 +126,8 @@ awk -F, '
     END {
         # Stable, meaningful column order: baselines first, btmalloc last.
         n=0
-        split("glibc jemalloc btmalloc", pref, " ")
-        for (i=1;i<=3;i++) if (pref[i] in seen_alloc) { allocs[n++]=pref[i]; delete seen_alloc[pref[i]] }
+        split("glibc jemalloc mimalloc btmalloc", pref, " ")
+        for (i=1;i<=4;i++) if (pref[i] in seen_alloc) { allocs[n++]=pref[i]; delete seen_alloc[pref[i]] }
         for (a in seen_alloc) allocs[n++]=a
         printf "%-22s %-18s %-16s", "benchmark", "param", "metric" > "/dev/stderr"
         for (i=0;i<n;i++) printf " %12s", allocs[i] > "/dev/stderr"

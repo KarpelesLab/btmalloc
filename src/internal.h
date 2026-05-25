@@ -233,6 +233,8 @@ btm_chunk_t *btm_chunk_obtain(btm_scpool_t *pool) BTM_HIDDEN;
 void        btm_chunk_dispose(btm_chunk_t *c) BTM_HIDDEN;
 /* Reset async/background state in a fork() child (no maintenance thread there). */
 void        btm_bg_atfork_child(void) BTM_HIDDEN;
+/* Start the maintenance thread once. Must be called with NO pool lock held. */
+void        btm_bg_ensure_started(void) BTM_HIDDEN;
 /* Create the backing memfd for mesh mode. Returns 1 on success. */
 int         btm_mesh_enable(void) BTM_HIDDEN;
 /* Remap donor's data region onto recipient's and release donor's pages.
