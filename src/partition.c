@@ -85,7 +85,7 @@ btm_slab_t *btm_slab_new(btm_partition_t *part, int sc) {
     unsigned npages = btm_sc_run_pages[sc];
     if (!pool->active ||
         pool->active->next_free_page + npages > BTM_PAGES_PER_CHUNK) {
-        btm_chunk_t *c = btm_chunk_map(pool);
+        btm_chunk_t *c = btm_chunk_obtain(pool);
         if (!c) return NULL;
         c->next = pool->chunks;
         c->prev = NULL;
@@ -132,14 +132,13 @@ static void slab_became_free(btm_scpool_t *pool, btm_slab_t *slab) {
     c->live_slabs--;
 
     if (c->live_slabs == 0) {
-        /* Whole chunk is free. Its other slabs (if any) sit in pool->empty. */
+        /* Whole chunk is free. Its other slabs (if any) sit in pool->empty.
+         * Hand it to the warm-chunk pool: pages get released asynchronously and
+         * the chunk is recycled for the next carve (here or in another pool). */
         purge_empties_of_chunk(pool, c);
-        if (c == pool->active) {
-            btm_chunk_reset(c); /* keep one warm chunk; release its RSS */
-        } else {
-            chunk_unlink(pool, c);
-            btm_chunk_unmap(c);
-        }
+        if (c == pool->active) pool->active = NULL;
+        chunk_unlink(pool, c);
+        btm_chunk_dispose(c);
     } else {
         /* Keep the slab around for cheap recycling (singly-linked). */
         slab->next = pool->empty;

@@ -159,19 +159,20 @@ static inline unsigned btm_cache_max(int sc) {
     return m;
 }
 
-/* ---- chunk.c: backing store + pointer registry ---- */
+/* ---- chunk.c: pointer registry ---- */
 extern _Atomic(uint64_t) btm_registry_gen BTM_HIDDEN; /* bumped on any removal */
 void        btm_chunk_init(void) BTM_HIDDEN;
-/* Map a fresh 2 MiB chunk owned by `pool` (registered, header initialized). */
-btm_chunk_t *btm_chunk_map(btm_scpool_t *pool) BTM_HIDDEN;
-/* Unregister and unmap a fully-drained chunk. */
-void        btm_chunk_unmap(btm_chunk_t *c) BTM_HIDDEN;
-/* Release a drained chunk's physical pages (MADV_DONTNEED) and reset it for
- * reuse, keeping it mapped and registered. */
-void        btm_chunk_reset(btm_chunk_t *c) BTM_HIDDEN;
 /* Resolve a user pointer to its owning header base, or 0 if foreign.
  * The returned address begins with a magic word (CHUNK or LARGE). */
 uintptr_t   btm_registry_lookup(const void *ptr) BTM_HIDDEN;
+
+/* ---- background.c: warm-chunk pool + async backing store (Phase C) ---- */
+/* Obtain a 2 MiB chunk for `pool` (from the warm pool or a fresh mmap),
+ * header initialized and ready to carve. */
+btm_chunk_t *btm_chunk_obtain(btm_scpool_t *pool) BTM_HIDDEN;
+/* Release a fully-drained chunk: queued for async MADV_DONTNEED and returned
+ * to the warm pool (or trimmed to the OS), off the calling thread. */
+void        btm_chunk_dispose(btm_chunk_t *c) BTM_HIDDEN;
 /* Register / unregister the 2 MiB regions [base, base+len) -> owner. */
 void        btm_registry_insert(uintptr_t base, size_t len, uintptr_t owner) BTM_HIDDEN;
 void        btm_registry_remove(uintptr_t base, size_t len) BTM_HIDDEN;

@@ -175,7 +175,10 @@ measured delta, not a guess.
   (active chunk MADV_DONTNEED+reset, others munmap). Returns more memory to the
   OS on drain than glibc/jemalloc (bench/RESULTS.md). Open: whole-chunk reclaim
   is pinned by single cached slots — Phase D compaction addresses this.
-- **Phase C** — async backing-store via io_uring.
+- **Phase C** ✔ — warm-chunk pool recycles drained chunks; background thread
+  releases pages via batched io_uring MADV_DONTNEED and pre-maps ahead of
+  demand. RSS drained 136 MB (best of three); 2× faster than jemalloc on
+  grow/free thrash. Malloc tail is refill-bound (separate optimization).
 - **Phase D** — hotness tracking + tiering + compaction.
 - **Phase E** — adaptive size classes + LD_PRELOAD hardening.
 

@@ -74,7 +74,12 @@ set(BTMALLOC_CORE_SOURCES
     src/partition.c
     src/tcache.c
     src/large.c
+    src/background.c
 )
+
+# liburing for the async backing-store (Phase C). Required.
+find_library(URING_LIB uring REQUIRED)
+find_path(URING_INCLUDE liburing.h)
 
 # Compile the core once as position-independent objects, reused by both libs.
 add_library(btmalloc_objs OBJECT ${BTMALLOC_CORE_SOURCES})
@@ -93,7 +98,7 @@ add_library(btmalloc SHARED ${BTMALLOC_SHARED_SOURCES})
 target_include_directories(btmalloc PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-target_link_libraries(btmalloc PUBLIC pthread)
+target_link_libraries(btmalloc PUBLIC pthread ${URING_LIB})
 set_target_properties(btmalloc PROPERTIES
     OUTPUT_NAME btmalloc
     SOVERSION ${PROJECT_VERSION_MAJOR}
@@ -105,7 +110,7 @@ add_library(btmalloc_static STATIC $<TARGET_OBJECTS:btmalloc_objs>)
 target_include_directories(btmalloc_static PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-target_link_libraries(btmalloc_static PUBLIC pthread)
+target_link_libraries(btmalloc_static PUBLIC pthread ${URING_LIB})
 set_target_properties(btmalloc_static PROPERTIES OUTPUT_NAME btmalloc)
 
 if(BTM_BUILD_TESTS)

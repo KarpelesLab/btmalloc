@@ -85,6 +85,47 @@ random churn this leaves chunks partially live (the mid-shrink 248 MB spike and
 the 148 MB residual). Phase D compaction consolidates sparse slabs so chunks
 can fully drain.
 
+## Phase C — async backing-store (warm-chunk pool + io_uring madvise)
+
+Global warm-chunk pool recycles drained chunks; a background thread releases
+their pages with batched `io_uring` `MADV_DONTNEED` and pre-maps ahead of
+demand. `BTM_NO_ASYNC=1` forces the synchronous fallback.
+
+### RSS drained (MB, lower better)
+
+| alloc | peak | drained |
+|-------|------|---------|
+| glibc | 182 | 187 |
+| jemalloc | 187 | 203 |
+| btmalloc | 184 | **136** |
+
+Improved from Phase B's 148 — async page release reclaims more.
+
+### Thrash: 40× (grow to 50k objects → free all), wall time (lower better)
+
+| alloc | time |
+|-------|------|
+| glibc | 32.2 ms |
+| jemalloc | 63.6 ms |
+| btmalloc | 32.9 ms |
+| btmalloc (BTM_NO_ASYNC) | 33.4 ms |
+
+btmalloc matches glibc and is **2× faster than jemalloc** — the warm pool
+eliminates the mmap/munmap cycling this pattern would otherwise cause.
+
+### Malloc latency (size=256, 16384-slot working set; ns, lower better)
+
+| pct | glibc | jemalloc | btmalloc |
+|-----|-------|----------|----------|
+| p999 | 33 | 37 | **23** |
+| p9999 | 1237 | **114** | 1031 |
+
+btmalloc wins p999 but its p9999 trails jemalloc: the malloc tail is dominated
+by the locked **refill** path (bin-empty → slab carve), which the warm pool
+doesn't touch. Flattening it is a refill-path optimization, separate from
+async backing. Async helps the *free* path (madvise offloaded) — not visible in
+a malloc-latency bench.
+
 ## Takeaways for next phases
 
 - **Win to defend:** cross-thread free / producer-consumer scaling.
