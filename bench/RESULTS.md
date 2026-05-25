@@ -435,6 +435,36 @@ requested, and calloc-zeroing are checked inline.
 The first thing it caught was a bug in the *oracle* (a realloc check that
 ignored the tag bytes), not the allocator; once fixed, the allocator is clean.
 
+## Profiling notes (callgrind + analysis)
+
+Profiled single-thread churn (no perf available; used valgrind/callgrind for
+instruction counts, then reasoned about cycles). Findings and actions:
+
+- **`btm_cache_max` did a `16384 / size` division on every free** (~6% of
+  instructions). Replaced with a precomputed const table — removes the divide.
+- **The free hot path called `slab_of()`** (`page_owner` -> descriptor ->
+  `slab->sc`/`part_idx`): 2-3 dependent loads across cache lines. But chunks
+  are per-(partition, size_class), so the chunk header already knows both —
+  store `sc`/`part_idx` in the chunk and skip `slab_of` on free entirely (it's
+  only needed by flush). Shortened the free dependency chain; helped threaded
+  local (≈720/950 Mops at 8/16 threads, up from ≈600).
+- **Folded `size_to_sc`'s two bounds checks** into one unsigned compare.
+
+Honest conclusion on small-object churn (~6.6 ns vs jemalloc ~2.4): callgrind
+shows ~65 instr/malloc and ~80/free, but the above instruction cuts barely moved
+churn — because tight churn is L1-hot and **cycle-bound on feature-inherent
+serial latency**, not instruction count: the partition hash (`imul64` per
+malloc, for PC anchoring), the safe-linking XOR (security), and the
+region-cache resolve. Those are the design's identity, not removable bottlenecks.
+The cuts still help instruction-bound and cache-cold paths (threaded, scattered).
+
+Known trade-off surfaced: **16 KiB scattered free is slow (~1.8 µs/op)** because
+emptied large multi-page slabs are `MADV_DONTNEED`'d eagerly — the very
+mechanism behind the 6.5x RSS win. Large slabs hold few objects so they empty
+often. Speeding it up (bigger warm budget, or async slab-decommit) trades RSS
+or adds complexity; left as-is to keep the memory headline. Async slab-decommit
+is the clean future fix (fast free + low RSS).
+
 ## Takeaways
 
 - **Win to defend:** cross-thread free / producer-consumer scaling.

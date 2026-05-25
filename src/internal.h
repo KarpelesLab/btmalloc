@@ -86,6 +86,8 @@ typedef struct btm_scpool btm_scpool_t;
 typedef struct btm_chunk {
     uint64_t          magic;          /* BTM_CHUNK_MAGIC */
     btm_scpool_t     *pool;           /* owning pool */
+    uint16_t          sc;             /* size class of every slab here */
+    uint16_t          part_idx;       /* owning partition index */
     struct btm_chunk *next, *prev;    /* pool's chunk list */
     uint32_t          next_free_page; /* bump pointer for slab carving */
     uint32_t          live_slabs;     /* carved slabs not yet fully freed */
@@ -202,20 +204,18 @@ extern const uint16_t btm_sc_run_pages[BTM_NUM_SIZE_CLASSES] BTM_HIDDEN;
 extern const uint8_t  btm_sc_lut[BTM_SC_LUT_ENTRIES] BTM_HIDDEN;
 void btm_size_class_init(void) BTM_HIDDEN;        /* builds the lookup table */
 
-/* Smallest size class fitting `size`, or -1 if 0 or > SMALL_MAX. Hot path. */
+/* Smallest size class fitting `size`, or -1 if 0 or > SMALL_MAX. Hot path.
+ * The single unsigned compare folds the zero and over-max checks: size==0
+ * underflows to SIZE_MAX (>= SMALL_MAX), and size>SMALL_MAX is caught directly. */
 static inline int btm_size_to_sc(size_t size) {
-    if (BTM_UNLIKELY(size == 0)) return -1;
-    if (BTM_UNLIKELY(size > BTM_SMALL_MAX_SIZE)) return -1;
+    if (BTM_UNLIKELY((size - 1) >= BTM_SMALL_MAX_SIZE)) return -1;
     return btm_sc_lut[(size - 1) >> 4];
 }
 
-/* Per-class TLS cache cap: ~16 KiB cached per bin, clamped to [8, 256]. */
-static inline unsigned btm_cache_max(int sc) {
-    unsigned m = (unsigned)(16384u / btm_sc_to_size[sc]);
-    if (m < 8) m = 8;
-    if (m > 256) m = 256;
-    return m;
-}
+/* Per-class TLS cache cap (~16 KiB per bin, clamped to [8,256]) — precomputed
+ * so the hot free path needs no division. */
+extern const uint16_t btm_cache_max_tbl[BTM_NUM_SIZE_CLASSES];
+static inline unsigned btm_cache_max(int sc) { return btm_cache_max_tbl[sc]; }
 
 /* ---- chunk.c: pointer registry ---- */
 extern _Atomic(uint64_t) btm_registry_gen BTM_HIDDEN; /* bumped on any removal */

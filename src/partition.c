@@ -122,6 +122,8 @@ btm_slab_t *btm_slab_new(btm_partition_t *part, int sc) {
         pool->active->next_free_page + npages > BTM_PAGES_PER_CHUNK) {
         btm_chunk_t *c = btm_chunk_obtain(pool);
         if (!c) return NULL;
+        c->sc = (uint16_t)sc; /* every slab in this chunk shares (part, sc) */
+        c->part_idx = (uint16_t)(part - btm_partitions);
         c->next = pool->chunks;
         c->prev = NULL;
         if (pool->chunks) pool->chunks->prev = c;

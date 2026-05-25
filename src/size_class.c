@@ -102,4 +102,11 @@ const uint8_t btm_sc_lut[BTM_SC_LUT_ENTRIES] = {
     35,35,35,35,35,35,35,35,35,35,35,35,35,35,35,35,
 };
 
-void btm_size_class_init(void) { /* table is compile-time constant now */ }
+/* Per-class TLS cache cap = clamp(16384 / size, 8, 256). Precomputed so the
+ * hot free path's threshold check needs no division. */
+const uint16_t btm_cache_max_tbl[BTM_NUM_SIZE_CLASSES] = {
+    256, 256, 256, 256, 204, 170, 146, 128, 102, 85, 73, 64, 51, 42, 36, 32,
+    25, 21, 18, 16, 12, 10, 9, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+};
+
+void btm_size_class_init(void) { /* tables are compile-time constants now */ }

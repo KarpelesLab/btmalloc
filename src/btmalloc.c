@@ -230,8 +230,8 @@ void *btm_malloc_at(size_t size, void *ra) {
 /* Report a detected double-free, attributing it to the call site that fed the
  * containing slab's partition, then abort. */
 __attribute__((noinline))
-static void btm_double_free(void *ptr, btm_slab_t *slab) {
-    void *ra = btm_partitions[slab->part_idx].sample_ra;
+static void btm_double_free(void *ptr, btm_chunk_t *c) {
+    void *ra = btm_partitions[c->part_idx].sample_ra;
     const char *sym = "?", *lib = "";
     Dl_info info;
     if (ra && dladdr(ra, &info)) {
@@ -241,8 +241,8 @@ static void btm_double_free(void *ptr, btm_slab_t *slab) {
     char line[256];
     int n = snprintf(line, sizeof line,
                      "btmalloc: double free of %p (size class %u bytes); "
-                     "slab's partition is fed by ~%s (%p in %s)\n",
-                     ptr, (unsigned)btm_sc_to_size[slab->sc], sym, ra, lib);
+                     "partition is fed by ~%s (%p in %s)\n",
+                     ptr, (unsigned)btm_sc_to_size[c->sc], sym, ra, lib);
     if (n > 0) { ssize_t w = write(2, line, (size_t)n); (void)w; }
     abort();
 }
@@ -263,18 +263,19 @@ void btm_free(void *ptr) {
         return;
     }
     btm_chunk_t *c = (btm_chunk_t *)owner;
-    btm_slab_t *slab = btm_slab_of(c, ptr);
-    int sc = slab->sc;
-    unsigned pidx = slab->part_idx; /* no pointer-division per free */
+    /* The chunk is per-(partition, size_class), so it knows both directly — no
+     * need to resolve the slab on the hot path (that's only for flush). */
+    int sc = c->sc;
+    unsigned pidx = c->part_idx;
 
     if (BTM_UNLIKELY(t == NULL)) {
         t = btm_tls_get();
-        if (!t) { btm_pool_free_one(slab, ptr); return; }
+        if (!t) { btm_pool_free_one(btm_slab_of(c, ptr), ptr); return; }
     }
     if (BTM_UNLIKELY(btm_harden_mode)) {
         /* Detect a (consecutive) double-free: the slot still carries the canary
          * stamped at its last free and not yet cleared by a reallocation. */
-        if (((uintptr_t *)ptr)[1] == btm_df_canary(ptr)) btm_double_free(ptr, slab);
+        if (((uintptr_t *)ptr)[1] == btm_df_canary(ptr)) btm_double_free(ptr, c);
     }
 
     btm_tls_bin_t *bin = btm_tls_bin_at(t, pidx, sc);
@@ -310,10 +311,9 @@ void *btm_realloc_at(void *ptr, size_t size, void *ra) {
 
     if (!(owner & 1)) { /* small (chunk) source */
         btm_chunk_t *c = (btm_chunk_t *)owner;
-        btm_slab_t *slab = btm_slab_of(c, ptr);
-        size_t old = btm_sc_to_size[slab->sc];
+        size_t old = btm_sc_to_size[c->sc];
         int nsc = btm_size_to_sc(size);
-        if (nsc == (int)slab->sc) return ptr; /* same class: no-op */
+        if (nsc == (int)c->sc) return ptr; /* same class: no-op */
 
         void *np = btm_malloc_at(size, ra);
         if (!np) return NULL;
@@ -389,9 +389,7 @@ size_t btm_malloc_usable_size(const void *ptr) {
     uintptr_t owner = btm_resolve_owner(btm_tls, ptr);
     if (!owner) return 0;
     if (!(owner & 1)) {
-        btm_chunk_t *c = (btm_chunk_t *)owner;
-        btm_slab_t *slab = btm_slab_of(c, ptr);
-        return btm_sc_to_size[slab->sc];
+        return btm_sc_to_size[((btm_chunk_t *)owner)->sc];
     }
     return btm_large_usable_size(owner & ~(uintptr_t)1, ptr);
 }
