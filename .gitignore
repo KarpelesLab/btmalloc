@@ -1,0 +1,37 @@
+# Build output
+build/
+build-*/
+out/
+cmake-build-*/
+
+# Compiled object / library files
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+
+# CMake artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.cache/
+
+# Benchmark results (kept under bench/results/ explicitly when committing)
+bench/results/*.csv
+!bench/results/.gitkeep
+
+# Misc
+core
+core.*
+*.dSYM/
