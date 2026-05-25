@@ -50,7 +50,10 @@ void *btm_large_alloc(size_t size, size_t alignment) {
     h->user_off = hdr;
     h->req_size = size;
 
-    btm_registry_insert(base, total, base);
+    /* Tag the registry owner's low bit to mark "large", so free can tell large
+     * from small (chunk) without dereferencing the base. Bases are >= 2 MiB
+     * aligned, so bit 0 is always available. */
+    btm_registry_insert(base, total, base | 1);
     return (void *)(base + hdr);
 }
 
@@ -82,7 +85,7 @@ void *btm_large_realloc(uintptr_t base, void *ptr, size_t newsz) {
     btm_registry_remove(base, old_total);
     void *nb = mremap((void *)base, old_total, new_total, MREMAP_MAYMOVE);
     if (nb == MAP_FAILED) {
-        btm_registry_insert(base, old_total, base); /* restore */
+        btm_registry_insert(base, old_total, base | 1); /* restore (tagged large) */
         return NULL;
     }
 
@@ -92,6 +95,6 @@ void *btm_large_realloc(uintptr_t base, void *ptr, size_t newsz) {
     nh->map_len = new_total;
     nh->user_off = user_off;
     nh->req_size = newsz;
-    btm_registry_insert(newbase, new_total, newbase);
+    btm_registry_insert(newbase, new_total, newbase | 1);
     return (void *)(newbase + user_off);
 }

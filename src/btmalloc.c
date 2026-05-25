@@ -126,26 +126,26 @@ void btm_free(void *ptr) {
         return;
     }
 
-    if (*(uint64_t *)owner == BTM_CHUNK_MAGIC) {
-        btm_chunk_t *c = (btm_chunk_t *)owner;
-        btm_slab_t *slab = btm_slab_of(c, ptr);
-        int sc = slab->sc;
-        unsigned pidx = slab->part_idx; /* no pointer-division per free */
-
-        if (BTM_UNLIKELY(t == NULL)) {
-            t = btm_tls_get();
-            if (!t) { btm_pool_free_one(slab, ptr); return; }
-        }
-        btm_tls_bin_t *bin = btm_tls_bin_at(t, pidx, sc);
-        bin->pool = c->pool; /* the chunk's pool is exactly (pidx, sc)'s pool */
-        *(void **)ptr = bin->free_head;
-        bin->free_head = ptr;
-        bin->count++;
-        unsigned cap = btm_cache_max(sc);
-        if (BTM_UNLIKELY(bin->count > cap)) btm_pool_flush(bin, cap / 2);
-    } else {
-        btm_large_free((void *)owner);
+    if (BTM_UNLIKELY(owner & 1)) { /* tagged large allocation */
+        btm_large_free((void *)(owner & ~(uintptr_t)1));
+        return;
     }
+    btm_chunk_t *c = (btm_chunk_t *)owner;
+    btm_slab_t *slab = btm_slab_of(c, ptr);
+    int sc = slab->sc;
+    unsigned pidx = slab->part_idx; /* no pointer-division per free */
+
+    if (BTM_UNLIKELY(t == NULL)) {
+        t = btm_tls_get();
+        if (!t) { btm_pool_free_one(slab, ptr); return; }
+    }
+    btm_tls_bin_t *bin = btm_tls_bin_at(t, pidx, sc);
+    bin->pool = c->pool; /* the chunk's pool is exactly (pidx, sc)'s pool */
+    *(void **)ptr = bin->free_head;
+    bin->free_head = ptr;
+    bin->count++;
+    unsigned cap = btm_cache_max(sc);
+    if (BTM_UNLIKELY(bin->count > cap)) btm_pool_flush(bin, cap / 2);
 }
 
 void *btm_calloc_at(size_t n, size_t size, void *ra) {
@@ -169,7 +169,7 @@ void *btm_realloc_at(void *ptr, size_t size, void *ra) {
     uintptr_t owner = btm_resolve_owner(btm_tls, ptr);
     if (BTM_UNLIKELY(owner == 0)) return NULL;
 
-    if (*(uint64_t *)owner == BTM_CHUNK_MAGIC) {
+    if (!(owner & 1)) { /* small (chunk) source */
         btm_chunk_t *c = (btm_chunk_t *)owner;
         btm_slab_t *slab = btm_slab_of(c, ptr);
         size_t old = btm_sc_to_size[slab->sc];
@@ -184,15 +184,16 @@ void *btm_realloc_at(void *ptr, size_t size, void *ra) {
     }
 
     /* Source is a large allocation. */
-    size_t old = btm_large_usable_size(owner, ptr);
+    uintptr_t base = owner & ~(uintptr_t)1;
+    size_t old = btm_large_usable_size(base, ptr);
     if (size <= BTM_SMALL_MAX_SIZE) {
         void *np = btm_malloc_at(size, ra);
         if (!np) return NULL;
         memcpy(np, ptr, old < size ? old : size);
-        btm_large_free((void *)owner);
+        btm_large_free((void *)base);
         return np;
     }
-    return btm_large_realloc(owner, ptr, size);
+    return btm_large_realloc(base, ptr, size);
 }
 
 /* ---------------- public API (capture the caller's return address) ---------------- */
@@ -248,10 +249,10 @@ size_t btm_malloc_usable_size(const void *ptr) {
     if (!ptr) return 0;
     uintptr_t owner = btm_resolve_owner(btm_tls, ptr);
     if (!owner) return 0;
-    if (*(uint64_t *)owner == BTM_CHUNK_MAGIC) {
+    if (!(owner & 1)) {
         btm_chunk_t *c = (btm_chunk_t *)owner;
         btm_slab_t *slab = btm_slab_of(c, ptr);
         return btm_sc_to_size[slab->sc];
     }
-    return btm_large_usable_size(owner, ptr);
+    return btm_large_usable_size(owner & ~(uintptr_t)1, ptr);
 }

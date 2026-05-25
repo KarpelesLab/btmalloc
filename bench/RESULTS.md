@@ -192,6 +192,25 @@ active `(partition, size_class)` set exceeded the table or collided; the dense
 array never evicts. The code is also simpler (no hashing, no eviction, no
 key bookkeeping).
 
+## Fast-path investigation (where the small-object gap actually is)
+
+Measured directly (static link, no LD_PRELOAD) to isolate costs:
+
+- **direct churn: 6.0 ns/op** vs ~7 ns through LD_PRELOAD → the preload wrapper
+  (PLT → shim → core, with the return-address capture) costs ~1 ns.
+- The allocator path itself is ~6 ns vs jemalloc's ~4.4 ns. Successively
+  removing the bin hash + eviction (dense index), a per-free pointer-division
+  (stored partition index), and the small/large magic load (owner low-bit tag)
+  each left churn essentially unchanged — confirming the residual ~1.5 ns is
+  **fixed per-op work inherent to the design**: hashing the call site into a
+  partition, and resolving a freed pointer through its slab metadata with no
+  per-object header. These are the cost of the features that win elsewhere
+  (call-site grouping, cross-thread-free routing, low RSS).
+
+Conclusion: the small-object single-thread gap is a small constant, not an
+algorithmic one, and it is amortized in real workloads that do actual work per
+allocation. Not worth trading the design's wins to chase further.
+
 ## Takeaways
 
 - **Win to defend:** cross-thread free / producer-consumer scaling.
