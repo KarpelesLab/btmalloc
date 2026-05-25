@@ -85,6 +85,8 @@ struct btm_slab {
     uint16_t         part_idx;    /* owning partition index (for bin lookup) */
     uint8_t          in_partial;  /* on the pool's partial list? */
     uint8_t          decommitted; /* data pages released via MADV_DONTNEED? */
+    uint8_t          retired;     /* meshed: no new allocations (mesh mode) */
+    uint8_t          _pad2[3];
 };
 
 /* ---- Size-class pool: per (partition, size_class) ----
@@ -197,6 +199,9 @@ void        btm_chunk_dispose(btm_chunk_t *c) BTM_HIDDEN;
 void        btm_bg_atfork_child(void) BTM_HIDDEN;
 /* Create the backing memfd for mesh mode. Returns 1 on success. */
 int         btm_mesh_enable(void) BTM_HIDDEN;
+/* Remap donor's data region onto recipient's and release donor's pages.
+ * Returns bytes reclaimed. Caller holds the pool lock; heap must be quiescent. */
+size_t      btm_mesh_remap(btm_slab_t *donor, btm_slab_t *recipient) BTM_HIDDEN;
 /* Register / unregister the 2 MiB regions [base, base+len) -> owner. */
 void        btm_registry_insert(uintptr_t base, size_t len, uintptr_t owner) BTM_HIDDEN;
 void        btm_registry_remove(uintptr_t base, size_t len) BTM_HIDDEN;
@@ -220,6 +225,17 @@ static inline btm_slab_t *btm_slab_of(btm_chunk_t *c, const void *ptr) {
     uint32_t page = (uint32_t)(((uintptr_t)ptr - (uintptr_t)c) >> BTM_PAGE_SHIFT);
     uint16_t owner = c->page_owner[page];
     return (btm_slab_t *)((char *)c + (size_t)owner * BTM_PAGE_SIZE);
+}
+
+/* ---- slab geometry ----
+ * In mesh mode a slab reserves its whole first page for the header so the
+ * remaining pages form a fully-remappable, slot-only data region; otherwise the
+ * header is inline and slots follow it. Returns the data base and slot count. */
+static inline char *btm_slab_data(const btm_slab_t *slab) {
+    extern int btm_mesh_mode;
+    if (btm_mesh_mode) return (char *)slab + BTM_PAGE_SIZE;
+    size_t hdr = (sizeof(btm_slab_t) + 15) & ~(size_t)15;
+    return (char *)slab + hdr;
 }
 
 /* ---- partition.c: slab pools, carving, refill/flush, reclaim ---- */

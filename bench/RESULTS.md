@@ -267,6 +267,43 @@ So the design exposes a tunable knob from "fast, statistical segregation"
 small, *measured* memory cost — the quantified trade-off curve prior work left
 implicit.
 
+## Phase G — true Mesh-style compaction (opt-in BTM_MESH=1)
+
+Implements object-moving compaction the Mesh (PLDI'19) way: chunks are
+memfd-backed, and `btm_compact()` finds sparse slabs of the same size class
+whose live-slot sets are disjoint, copies one slab's live objects into the
+other's matching free slots, and remaps the donor's virtual pages onto the
+recipient's physical pages (MAP_FIXED) — so objects move in *physical* memory
+while their *virtual* addresses (and thus all pointers) stay valid. The donor's
+own pages are punched out. Requires a quiescent heap (caller's responsibility);
+trivially safe single-threaded.
+
+**The mechanism is correct.** A shadow-map test (`test_compact`) allocates
+120k medium objects, frees 85% at random, compacts, and verifies all ~17.9k
+survivors are byte-intact after their physical pages were relocated — clean,
+including under AddressSanitizer. 4.2 MB reclaimed on that run.
+
+**But it is not yet net-positive**, and this is the honest headline:
+
+| same workload (alloc 120k, free 85%) | RSS |
+|--------------------------------------|-----|
+| default mode                         | 200.7 MB |
+| mesh mode, before compact            | 218.0 MB |
+| mesh mode, after compact             | 213.9 MB |
+
+Mesh mode gives each slab a dedicated header page (the shortcut that avoided an
+out-of-line-metadata refactor), costing ~+17 MB here; compaction recovers only
+~4 MB, so mesh mode nets out *worse* than default on this workload. Meshing
+pays off only when disjoint sparse pairs are common enough to recover more than
+that per-slab overhead.
+
+**Path to net-positive: out-of-line slab metadata.** Moving slab headers out of
+the data region (into a per-chunk descriptor array) would make data slabs pure
+slot pages — zero density penalty in mesh mode and cleaner meshing (remap all
+data pages, no header page to preserve). That is the remaining work to make
+compaction a win rather than a correctly-implemented-but-overhead-dominated
+mechanism. Fork-unsafe (MAP_SHARED); see DESIGN.
+
 ## Takeaways
 
 - **Win to defend:** cross-thread free / producer-consumer scaling.

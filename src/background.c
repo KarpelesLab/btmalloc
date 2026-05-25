@@ -302,6 +302,34 @@ void btm_bg_atfork_child(void) {
     atomic_store_explicit(&bg_started, 0, memory_order_release);
 }
 
+/* Mesh: remap the donor slab's data region onto the recipient's (so the
+ * donor's virtual addresses now read the recipient's physical pages, where its
+ * live objects were just copied), then punch the donor's own backing pages.
+ * Both slabs have identical geometry (same size class, header in page 0, data
+ * in pages 1..npages-1). Returns bytes of physical memory released. Caller must
+ * hold the pool lock and guarantee no concurrent access to the donor's objects
+ * (heap quiescent). */
+size_t btm_mesh_remap(btm_slab_t *donor, btm_slab_t *recipient) {
+    btm_chunk_t *dc = (btm_chunk_t *)((uintptr_t)donor & ~(BTM_CHUNK_SIZE - 1));
+    btm_chunk_t *rc = (btm_chunk_t *)((uintptr_t)recipient & ~(BTM_CHUNK_SIZE - 1));
+    unsigned dfp = (unsigned)(((uintptr_t)donor - (uintptr_t)dc) >> BTM_PAGE_SHIFT);
+    unsigned rfp = (unsigned)(((uintptr_t)recipient - (uintptr_t)rc) >> BTM_PAGE_SHIFT);
+    unsigned data_pages = donor->npages - 1; /* page 0 is the header */
+    size_t len = (size_t)data_pages * BTM_PAGE_SIZE;
+
+    uintptr_t donor_data = (uintptr_t)donor + BTM_PAGE_SIZE;
+    uint64_t recip_off = rc->memfd_off + (uint64_t)(rfp + 1) * BTM_PAGE_SIZE;
+    uint64_t donor_off = dc->memfd_off + (uint64_t)(dfp + 1) * BTM_PAGE_SIZE;
+
+    void *r = mmap((void *)donor_data, len, PROT_READ | PROT_WRITE,
+                   MAP_SHARED | MAP_FIXED, memfd, (off_t)recip_off);
+    if (r == MAP_FAILED) return 0;
+    madvise((void *)donor_data, len, MADV_DONTFORK);
+    fallocate(memfd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+              (off_t)donor_off, (off_t)len);
+    return len;
+}
+
 /* ---- public obtain / dispose ---- */
 
 btm_chunk_t *btm_chunk_obtain(btm_scpool_t *pool) {

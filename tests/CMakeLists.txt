@@ -12,6 +12,8 @@ endfunction()
 
 btm_add_test(test_basic)
 btm_add_test(test_stress)
+btm_add_test(test_compact)
+set_tests_properties(test_compact PROPERTIES ENVIRONMENT "BTM_MESH=1")
 
 # Preload test needs the shared library path at runtime. Only meaningful when
 # the shared lib actually overrides libc malloc (not under ASan, which provides

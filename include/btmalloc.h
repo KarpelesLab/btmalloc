@@ -89,6 +89,21 @@ size_t btm_malloc_usable_size(const void *ptr);
 BTM_API
 void btm_heap_profile(int fd);
 
+/* Compact the heap by meshing: sparse slabs of the same size class whose live
+ * slots do not overlap are consolidated onto shared physical pages (the others
+ * are released to the OS), without moving objects in the virtual address space
+ * (pointers stay valid). Returns the number of bytes of physical memory
+ * reclaimed.
+ *
+ * Only does anything when the allocator was started in mesh mode (BTM_MESH=1),
+ * which is backed by a memfd. THE CALLER MUST ENSURE THE HEAP IS QUIESCENT —
+ * no other thread may allocate, free, or access heap objects during the call —
+ * because live objects are physically relocated. Trivially safe for a
+ * single-threaded program; a threaded program must pause its workers first.
+ * Returns 0 if not in mesh mode. */
+BTM_API
+size_t btm_compact(void);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

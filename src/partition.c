@@ -60,20 +60,23 @@ static inline void partial_remove(btm_scpool_t *pool, btm_slab_t *slab) {
 static void slab_format(btm_slab_t *slab, btm_partition_t *part, int sc,
                         unsigned npages) {
     size_t slot = btm_sc_to_size[sc];
-    size_t hdr = (sizeof(btm_slab_t) + 15) & ~(size_t)15;
-    char  *data = (char *)slab + hdr;
-    size_t avail = (size_t)npages * BTM_PAGE_SIZE - hdr;
-    uint32_t nslots = (uint32_t)(avail / slot);
 
     slab->magic = 0;
     slab->part = part;
     slab->part_idx = (uint16_t)(part - btm_partitions);
     slab->sc = (uint16_t)sc;
     slab->npages = (uint16_t)npages;
-    slab->nslots = nslots;
-    slab->free_count = nslots;
     slab->next = slab->prev = NULL;
     slab->in_partial = 0;
+    slab->retired = 0;
+
+    /* Data base + capacity depend on the layout (see btm_slab_data). In mesh
+     * mode page 0 is header-only and the data region is pages 1..npages-1. */
+    char *data = btm_slab_data(slab);
+    size_t avail = (size_t)npages * BTM_PAGE_SIZE - (size_t)(data - (char *)slab);
+    uint32_t nslots = (uint32_t)(avail / slot);
+    slab->nslots = nslots;
+    slab->free_count = nslots;
 
     void *next = NULL;
     for (uint32_t i = nslots; i-- > 0;) {
@@ -108,7 +111,8 @@ btm_slab_t *btm_slab_new(btm_partition_t *part, int sc) {
         return s;
     }
 
-    unsigned npages = btm_sc_run_pages[sc];
+    /* Mesh mode reserves one extra page per slab for the out-of-data header. */
+    unsigned npages = btm_sc_run_pages[sc] + (btm_mesh_mode ? 1u : 0u);
     if (!pool->active ||
         pool->active->next_free_page + npages > BTM_PAGES_PER_CHUNK) {
         btm_chunk_t *c = btm_chunk_obtain(pool);
@@ -244,13 +248,126 @@ void btm_pool_flush(btm_tls_bin_t *bin, unsigned keep) {
         *(void **)s = slab->free_head;
         slab->free_head = s;
         slab->free_count++;
-        if (slab->free_count == slab->nslots) {
+        if (slab->retired) {
+            /* Meshed slab: inert — track frees but never reallocate/reclaim. */
+        } else if (slab->free_count == slab->nslots) {
             slab_became_free(pool, slab);
         } else if (!slab->in_partial) {
             partial_push(pool, slab);
         }
     }
     pthread_mutex_unlock(&pool->lock);
+}
+
+/* ---- compaction (Mesh) ---- */
+
+#define BTM_OCC_MAXSLOTS 1024
+#define BTM_OCC_WORDS (BTM_OCC_MAXSLOTS / 64)
+
+/* Build the occupied-slot bitmap (bit set = slot in use, i.e. not in the
+ * freelist). Returns the occupied count. */
+static unsigned build_occ(btm_slab_t *s, uint64_t *bm) {
+    unsigned words = (s->nslots + 63) / 64;
+    for (unsigned i = 0; i < words; i++) bm[i] = 0;
+    for (uint32_t k = 0; k < s->nslots; k++) bm[k / 64] |= 1ULL << (k % 64);
+
+    char *data = btm_slab_data(s);
+    size_t slot = btm_sc_to_size[s->sc];
+    for (void *f = s->free_head; f; f = *(void **)f) {
+        size_t idx = (size_t)((char *)f - data) / slot;
+        bm[idx / 64] &= ~(1ULL << (idx % 64));
+    }
+    return s->nslots - s->free_count;
+}
+
+/* Mesh donor D into recipient R (occupancy disjoint). Copies D's live objects
+ * into R's matching free slots, rebuilds R's freelist to exclude them, remaps
+ * D's data region onto R's, and retires D. Returns bytes reclaimed. */
+static size_t mesh_pair(btm_scpool_t *pool, btm_slab_t *R, btm_slab_t *D,
+                        const uint64_t *Rocc, const uint64_t *Docc) {
+    int sc = R->sc;
+    size_t slot = btm_sc_to_size[sc];
+    char *Rd = btm_slab_data(R), *Dd = btm_slab_data(D);
+
+    /* Copy D's live objects into R's (free) slots at the same index. */
+    for (uint32_t k = 0; k < D->nslots; k++) {
+        if (Docc[k / 64] & (1ULL << (k % 64)))
+            memcpy(Rd + (size_t)k * slot, Dd + (size_t)k * slot, slot);
+    }
+
+    /* Rebuild R's freelist: keep slots that are free in R AND not now holding a
+     * donor object. */
+    void *head = NULL;
+    unsigned cnt = 0;
+    for (uint32_t k = R->nslots; k-- > 0;) {
+        int r_occ = (Rocc[k / 64] >> (k % 64)) & 1;
+        int d_occ = (Docc[k / 64] >> (k % 64)) & 1;
+        if (!r_occ && !d_occ) {
+            void *s = Rd + (size_t)k * slot;
+            *(void **)s = head;
+            head = s;
+            cnt++;
+        }
+    }
+    R->free_head = head;
+    R->free_count = cnt;
+
+    size_t reclaimed = btm_mesh_remap(D, R);
+
+    /* Retire the donor: its objects now live in R; its slots must never be
+     * reallocated. R stays active for its remaining (non-donor) free slots. */
+    partial_remove(pool, D);
+    D->retired = 1;
+    return reclaimed;
+}
+
+size_t btm_compact(void) {
+    if (!btm_mesh_mode) return 0;
+    if (!atomic_load_explicit(&btm_ready, memory_order_acquire)) return 0;
+
+    size_t reclaimed = 0;
+    for (unsigned p = 0; p < btm_nparts; p++) {
+        for (int sc = 0; sc < BTM_NUM_SIZE_CLASSES; sc++) {
+            if (btm_sc_run_pages[sc] < 2) continue; /* meshing not worth it */
+            btm_scpool_t *pool = &btm_partitions[p].pools[sc];
+            pthread_mutex_lock(&pool->lock);
+
+            /* Gather sparse, non-retired partial slabs as candidates. */
+            btm_slab_t *cand[64];
+            uint64_t occ[64][BTM_OCC_WORDS];
+            int nc = 0;
+            for (btm_slab_t *s = pool->partial; s && nc < 64; s = s->next) {
+                if (s->retired || s->nslots > BTM_OCC_MAXSLOTS) continue;
+                unsigned used = s->nslots - s->free_count;
+                if (used == 0 || used * 2 > s->nslots) continue; /* not sparse */
+                cand[nc] = s;
+                build_occ(s, occ[nc]);
+                nc++;
+            }
+
+            /* Greedy: for each donor, find a recipient with disjoint occupancy. */
+            char used_flag[64] = {0};
+            unsigned words = 0;
+            for (int i = 0; i < nc; i++) {
+                if (used_flag[i]) continue;
+                for (int j = 0; j < nc; j++) {
+                    if (i == j || used_flag[j]) continue;
+                    if (cand[i]->nslots != cand[j]->nslots) continue;
+                    words = (cand[i]->nslots + 63) / 64;
+                    int disjoint = 1;
+                    for (unsigned w = 0; w < words; w++)
+                        if (occ[i][w] & occ[j][w]) { disjoint = 0; break; }
+                    if (!disjoint) continue;
+                    /* i = recipient, j = donor. */
+                    reclaimed += mesh_pair(pool, cand[i], cand[j], occ[i], occ[j]);
+                    used_flag[i] = used_flag[j] = 1;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&pool->lock);
+        }
+    }
+    return reclaimed;
 }
 
 void btm_pool_free_one(btm_slab_t *slab, void *ptr) {
@@ -260,7 +377,9 @@ void btm_pool_free_one(btm_slab_t *slab, void *ptr) {
     slab->free_head = ptr;
     slab->free_count++;
     if (pool->outstanding) pool->outstanding--;
-    if (slab->free_count == slab->nslots) {
+    if (slab->retired) {
+        /* Meshed slab: inert. */
+    } else if (slab->free_count == slab->nslots) {
         slab_became_free(pool, slab);
     } else if (!slab->in_partial) {
         partial_push(pool, slab);

@@ -188,6 +188,13 @@ measured delta, not a guess.
   libc stubs, real-program validation (python/git/gcc/perl/threaded). Adaptive
   size classes deferred (per-partition size tables would tax the hot path for a
   marginal frag gain) — see bench/RESULTS.md.
+- **Phase G** ✔ (mechanism) — true Mesh-style object-moving compaction, opt-in
+  BTM_MESH=1: memfd-backed chunks, btm_compact() copies disjoint sparse slabs
+  together and MAP_FIXED-remaps the donor onto the recipient (pointers stay
+  valid). Correct + ASan-clean (test_compact). Not yet net-positive: the
+  per-slab header-page overhead exceeds the meshing gain; out-of-line slab
+  metadata is the remaining work to remove that overhead. Fork-unsafe
+  (MAP_SHARED, MADV_DONTFORK'd). See bench/RESULTS.md.
 
 Each phase ends with a green build, passing tests, refreshed benchmark numbers,
 and a commit pushed to `master`.
