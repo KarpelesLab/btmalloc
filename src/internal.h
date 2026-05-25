@@ -101,8 +101,21 @@ typedef struct btm_tls_bin {
     void    *free_head;  /* cached freelist */
 } btm_tls_bin_t;
 
+/* Per-thread region cache: maps a 2 MiB region -> its owning header, so the
+ * common case of freeing into recently-touched regions skips the radix walk.
+ * Validated against btm_registry_gen, which is bumped whenever a region's
+ * owner is cleared (large free, or chunk reclaim in later phases), so stale
+ * entries are detected with one cheap compare. */
+#define BTM_RCACHE 16 /* power of two */
+typedef struct btm_rcache_ent {
+    uintptr_t region;
+    uintptr_t owner;
+    uint64_t  gen;
+} btm_rcache_ent_t;
+
 typedef struct btm_tls {
-    btm_tls_bin_t bins[BTM_TLS_BINS];
+    btm_tls_bin_t    bins[BTM_TLS_BINS];
+    btm_rcache_ent_t rcache[BTM_RCACHE];
 } btm_tls_t;
 
 /* ---- Globals (defined in btmalloc.c) ---- */
@@ -112,13 +125,29 @@ extern _Atomic(int)     btm_ready BTM_HIDDEN;
 void                    btm_ensure_init(void) BTM_HIDDEN;
 
 /* ---- size_class.c ---- */
+#define BTM_SC_LUT_ENTRIES (BTM_SMALL_MAX_SIZE / 16) /* 1024 */
 extern const uint32_t btm_sc_to_size[BTM_NUM_SIZE_CLASSES] BTM_HIDDEN;
 extern const uint16_t btm_sc_run_pages[BTM_NUM_SIZE_CLASSES] BTM_HIDDEN;
+extern uint8_t        btm_sc_lut[BTM_SC_LUT_ENTRIES] BTM_HIDDEN;
 void btm_size_class_init(void) BTM_HIDDEN;        /* builds the lookup table */
-int  btm_size_to_sc(size_t size) BTM_HIDDEN;      /* -1 if > SMALL_MAX or 0 */
-unsigned btm_cache_max(int sc) BTM_HIDDEN;        /* per-class TLS cache cap */
+
+/* Smallest size class fitting `size`, or -1 if 0 or > SMALL_MAX. Hot path. */
+static inline int btm_size_to_sc(size_t size) {
+    if (BTM_UNLIKELY(size == 0)) return -1;
+    if (BTM_UNLIKELY(size > BTM_SMALL_MAX_SIZE)) return -1;
+    return btm_sc_lut[(size - 1) >> 4];
+}
+
+/* Per-class TLS cache cap: ~16 KiB cached per bin, clamped to [8, 256]. */
+static inline unsigned btm_cache_max(int sc) {
+    unsigned m = (unsigned)(16384u / btm_sc_to_size[sc]);
+    if (m < 8) m = 8;
+    if (m > 256) m = 256;
+    return m;
+}
 
 /* ---- chunk.c: backing store + pointer registry + slab carving ---- */
+extern _Atomic(uint64_t) btm_registry_gen BTM_HIDDEN; /* bumped on any removal */
 void        btm_chunk_init(void) BTM_HIDDEN;
 /* Carve a fresh slab for (part, sc) from the global chunk pool. */
 btm_slab_t *btm_slab_new(btm_partition_t *part, int sc) BTM_HIDDEN;
@@ -128,6 +157,21 @@ uintptr_t   btm_registry_lookup(const void *ptr) BTM_HIDDEN;
 /* Register / unregister the 2 MiB regions [base, base+len) -> owner. */
 void        btm_registry_insert(uintptr_t base, size_t len, uintptr_t owner) BTM_HIDDEN;
 void        btm_registry_remove(uintptr_t base, size_t len) BTM_HIDDEN;
+/* Resolve a pointer to its owning header base, using the per-thread region
+ * cache first and falling back to the radix registry. Returns 0 if foreign. */
+static inline uintptr_t btm_resolve_owner(btm_tls_t *t, const void *ptr) {
+    if (BTM_UNLIKELY(t == NULL)) return btm_registry_lookup(ptr);
+    uintptr_t region = (uintptr_t)ptr >> BTM_CHUNK_SHIFT;
+    uint64_t gen = atomic_load_explicit(&btm_registry_gen, memory_order_acquire);
+    unsigned i = (unsigned)region & (BTM_RCACHE - 1);
+    btm_rcache_ent_t *e = &t->rcache[i];
+    if (BTM_LIKELY(e->region == region && e->gen == gen && e->owner))
+        return e->owner;
+    uintptr_t owner = btm_registry_lookup(ptr);
+    if (owner) { e->region = region; e->owner = owner; e->gen = gen; }
+    return owner;
+}
+
 /* Given a pointer known to live in chunk `c`, return its slab. */
 static inline btm_slab_t *btm_slab_of(btm_chunk_t *c, const void *ptr) {
     uint32_t page = (uint32_t)(((uintptr_t)ptr - (uintptr_t)c) >> BTM_PAGE_SHIFT);
@@ -147,7 +191,20 @@ void  btm_pool_free_one(btm_slab_t *slab, void *ptr) BTM_HIDDEN;
 /* ---- tcache.c ---- */
 extern _Thread_local btm_tls_t *btm_tls;          /* NULL until first use */
 btm_tls_t     *btm_tls_get(void) BTM_HIDDEN;      /* lazily create per-thread */
-btm_tls_bin_t *btm_tls_bin_for(btm_tls_t *t, unsigned key) BTM_HIDDEN;
+
+/* Find (or claim) the cache bin for `key`. Direct-mapped; a key miss evicts
+ * the resident bin (flushing its slots home) and re-keys the slot. Inlined
+ * into the hot path. */
+static inline btm_tls_bin_t *btm_tls_bin_for(btm_tls_t *t, unsigned key) {
+    unsigned h = (key * 2654435761u) & (BTM_TLS_BINS - 1);
+    btm_tls_bin_t *bin = &t->bins[h];
+    if (BTM_LIKELY(bin->key == key)) return bin;
+    if (bin->key && bin->count) btm_pool_flush(bin, 0);
+    bin->key = key;
+    bin->count = 0;
+    bin->free_head = NULL;
+    return bin;
+}
 
 /* ---- large.c ---- */
 void  *btm_large_alloc(size_t size, size_t alignment) BTM_HIDDEN;

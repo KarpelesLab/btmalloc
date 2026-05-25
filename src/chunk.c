@@ -27,6 +27,10 @@
 static _Atomic(_Atomic(uintptr_t) *) radix_l1[BTM_RADIX_L1_SIZE];
 static pthread_mutex_t registry_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* Bumped whenever a region's owner is cleared, so per-thread region caches can
+ * detect staleness with one compare. Inserts to fresh regions don't bump it. */
+_Atomic(uint64_t) btm_registry_gen;
+
 static inline unsigned radix_i1(uintptr_t key) {
     return (unsigned)(key >> BTM_RADIX_L2_BITS) & (BTM_RADIX_L1_SIZE - 1);
 }
@@ -71,6 +75,8 @@ void btm_registry_remove(uintptr_t base, size_t len) {
     pthread_mutex_lock(&registry_lock);
     for (uintptr_t k = first; k <= last; k++) registry_set_locked(k, 0);
     pthread_mutex_unlock(&registry_lock);
+    /* Invalidate stale region-cache entries everywhere. */
+    atomic_fetch_add_explicit(&btm_registry_gen, 1, memory_order_release);
 }
 
 /* ---------------- chunk allocation ---------------- */

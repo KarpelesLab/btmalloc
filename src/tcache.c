@@ -50,17 +50,4 @@ btm_tls_t *btm_tls_get(void) {
     return t;
 }
 
-btm_tls_bin_t *btm_tls_bin_for(btm_tls_t *t, unsigned key) {
-    unsigned h = (key * 2654435761u) & (BTM_TLS_BINS - 1);
-    btm_tls_bin_t *bin = &t->bins[h];
-    if (BTM_LIKELY(bin->key == key)) return bin;
-
-    /* Key miss: evict the resident bin (return its slots) and claim the slot.
-     * Direct-mapped, so collisions thrash — acceptable while the active
-     * (partition, size_class) working set stays well under BTM_TLS_BINS. */
-    if (bin->key && bin->count) btm_pool_flush(bin, 0);
-    bin->key = key;
-    bin->count = 0;
-    bin->free_head = NULL;
-    return bin;
-}
+/* btm_tls_bin_for is defined static inline in internal.h (hot path). */

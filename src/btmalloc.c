@@ -107,7 +107,8 @@ void *btm_malloc_at(size_t size, void *ra) {
 void btm_free(void *ptr) {
     if (!ptr) return;
 
-    uintptr_t owner = btm_registry_lookup(ptr);
+    btm_tls_t *t = btm_tls;
+    uintptr_t owner = btm_resolve_owner(t, ptr);
     if (BTM_UNLIKELY(owner == 0)) {
         /* Foreign pointer / invalid free. Silently ignore (matches glibc with
          * checks disabled); a debug build can be made to abort here. */
@@ -121,7 +122,6 @@ void btm_free(void *ptr) {
         unsigned pidx = (unsigned)(slab->part - btm_partitions);
         unsigned key = pidx * BTM_NUM_SIZE_CLASSES + (unsigned)sc + 1u;
 
-        btm_tls_t *t = btm_tls;
         if (BTM_UNLIKELY(t == NULL)) {
             t = btm_tls_get();
             if (!t) { btm_pool_free_one(slab, ptr); return; }
@@ -155,7 +155,7 @@ void *btm_realloc_at(void *ptr, size_t size, void *ra) {
     if (ptr == NULL) return btm_malloc_at(size, ra);
     if (size == 0) { btm_free(ptr); return NULL; }
 
-    uintptr_t owner = btm_registry_lookup(ptr);
+    uintptr_t owner = btm_resolve_owner(btm_tls, ptr);
     if (BTM_UNLIKELY(owner == 0)) return NULL;
 
     if (*(uint64_t *)owner == BTM_CHUNK_MAGIC) {
@@ -235,7 +235,7 @@ void *btm_aligned_alloc(size_t alignment, size_t size) {
 
 size_t btm_malloc_usable_size(const void *ptr) {
     if (!ptr) return 0;
-    uintptr_t owner = btm_registry_lookup(ptr);
+    uintptr_t owner = btm_resolve_owner(btm_tls, ptr);
     if (!owner) return 0;
     if (*(uint64_t *)owner == BTM_CHUNK_MAGIC) {
         btm_chunk_t *c = (btm_chunk_t *)owner;
