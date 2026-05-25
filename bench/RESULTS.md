@@ -1,12 +1,46 @@
 # Benchmark results
 
 Machine: Intel i9-14900K (8 P-cores + 16 E-cores, 32 threads), Linux 6.12,
-glibc 2.41, GCC 14. Comparison baselines: glibc malloc, jemalloc 5.x
-(`/usr/lib64/libjemalloc.so.2`). All runs via `bench/run.sh` with
-`BENCH_TASKSET` pinning to reduce P/E-core variance.
+glibc 2.41, GCC 14, 23 GiB swap. Baselines: glibc malloc, jemalloc 5.x,
+mimalloc 3.x — all four compared by LD_PRELOAD'ing the same binaries via
+`bench/run.sh` (which auto-detects jemalloc/mimalloc and adds btmalloc).
 
 Numbers are indicative single runs, not averaged — treat as deltas, not
-absolutes. Reproduce with `bench/run.sh`.
+absolutes. Reproduce with `bench/run.sh build` (or per-allocator with
+`BENCH_ALLOCATORS="glibc jemalloc mimalloc btmalloc"`).
+
+## Four-way summary (glibc / jemalloc / mimalloc / btmalloc)
+
+| metric (units)                              | glibc | jemalloc | mimalloc | btmalloc |
+|---------------------------------------------|------:|---------:|---------:|---------:|
+| churn 64 B, 1 thread (ns/op, lower)         |  4.2  |  **2.2** |   2.5    |   6.7    |
+| churn 16 KiB, 1 thread (ns/op, lower)       | 16.1  |  10.7    |  12.7    | **6.8**  |
+| local alloc, 16 threads (Mops, higher)      |  229  |   738    | **1296** |   654    |
+| producer/consumer, 16 threads (Mops, higher)|  6.8  |   5.2    | **9.4**  |   8.1    |
+| malloc p999 (ns, lower)                     |  31   |   38     |  136     | **19**   |
+| malloc p9999 (ns, lower)                    | 1291  | **118**  |  676     |  820     |
+| RSS steady, fragmenting churn (MB, lower)   |  190  |   203    |  201     | **29**   |
+| RSS drained (MB, lower)                     |  187  |   203    |  201     | **19**   |
+| cold-data eviction (btm_pageout_cold)       |  --   |   --     |   --     | **94%**  |
+
+Reading it honestly:
+
+- **Memory is btmalloc's decisive win**: ~6.5-7x less resident memory than all
+  three under fragmenting churn, and the only one that returns memory after a
+  burst (the others retain their peak). Plus `btm_pageout_cold()` evicts cold
+  live data (94% drop) — a capability none of the others have.
+- **btmalloc also wins** large-object throughput and malloc p999 latency, and
+  is a close 2nd (to mimalloc) on producer/consumer cross-thread free.
+- **mimalloc leads raw throughput** (local scaling, small-object churn ties
+  jemalloc); **jemalloc has the flattest tail** (p9999).
+- **btmalloc trails** on small-object single-thread throughput (~6.7 vs ~2.4 ns
+  — the fixed cost of call-site hashing + header-free pointer resolution) and on
+  the p9999 tail (refill-bound). These are throughput micro-costs; the design
+  trades them for memory, cross-thread scaling, and novel capabilities
+  (compaction, cold tiering, call-site profiling, layered security).
+
+Detailed per-phase numbers below (some predate later refactors; the table above
+is current).
 
 ## Phase A — PC-anchored partitioned core (P=64 default)
 
