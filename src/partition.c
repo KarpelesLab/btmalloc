@@ -26,15 +26,16 @@ static inline btm_chunk_t *chunk_of(const void *p) {
     return (btm_chunk_t *)((uintptr_t)p & ~(BTM_CHUNK_SIZE - 1));
 }
 
-/* Release an empty slab's data pages (everything past its inline header page).
- * Only possible for multi-page slabs; 1-page slabs share their page with the
- * header and must wait for whole-chunk reclaim. */
+/* Release an empty slab's data pages to the OS. With out-of-line descriptors
+ * the data region is pure slot pages, so this now works for every class
+ * (including single-page slabs). */
 static void slab_decommit(btm_slab_t *slab) {
-    if (slab->npages >= 2 && !slab->decommitted) {
-        madvise((char *)slab + BTM_PAGE_SIZE,
-                (size_t)(slab->npages - 1) * BTM_PAGE_SIZE, MADV_DONTNEED);
-        slab->decommitted = 1;
-    }
+    if (slab->decommitted) return;
+    btm_chunk_t *c = chunk_of(slab);
+    uint64_t off = c->memfd_off + (uint64_t)slab->first_page * BTM_PAGE_SIZE;
+    btm_release_pages(btm_slab_data(slab), off,
+                      (size_t)slab->npages * BTM_PAGE_SIZE);
+    slab->decommitted = 1;
 }
 
 /* ---- partial list (doubly-linked via next/prev) ---- */
@@ -57,24 +58,20 @@ static inline void partial_remove(btm_scpool_t *pool, btm_slab_t *slab) {
 
 /* ---- slab formatting ---- */
 
-static void slab_format(btm_slab_t *slab, btm_partition_t *part, int sc,
-                        unsigned npages) {
+/* Format a descriptor whose first_page and npages are already set. */
+static void slab_format(btm_slab_t *slab, btm_partition_t *part, int sc) {
     size_t slot = btm_sc_to_size[sc];
 
-    slab->magic = 0;
-    slab->part = part;
     slab->part_idx = (uint16_t)(part - btm_partitions);
     slab->sc = (uint16_t)sc;
-    slab->npages = (uint16_t)npages;
     slab->next = slab->prev = NULL;
     slab->in_partial = 0;
     slab->retired = 0;
+    slab->decommitted = 0;
 
-    /* Data base + capacity depend on the layout (see btm_slab_data). In mesh
-     * mode page 0 is header-only and the data region is pages 1..npages-1. */
+    /* The data region is npages pure slot-only pages (no inline header). */
     char *data = btm_slab_data(slab);
-    size_t avail = (size_t)npages * BTM_PAGE_SIZE - (size_t)(data - (char *)slab);
-    uint32_t nslots = (uint32_t)(avail / slot);
+    uint32_t nslots = (uint32_t)((size_t)slab->npages * BTM_PAGE_SIZE / slot);
     slab->nslots = nslots;
     slab->free_count = nslots;
 
@@ -105,14 +102,13 @@ btm_slab_t *btm_slab_new(btm_partition_t *part, int sc) {
         pool->empty_cold = s->next;
     }
     if (s) {
-        s->decommitted = 0;
-        slab_format(s, part, sc, s->npages);
+        /* Recycled descriptor keeps its first_page/npages. */
+        slab_format(s, part, sc);
         chunk_of(s)->live_slabs++;
         return s;
     }
 
-    /* Mesh mode reserves one extra page per slab for the out-of-data header. */
-    unsigned npages = btm_sc_run_pages[sc] + (btm_mesh_mode ? 1u : 0u);
+    unsigned npages = btm_sc_run_pages[sc];
     if (!pool->active ||
         pool->active->next_free_page + npages > BTM_PAGES_PER_CHUNK) {
         btm_chunk_t *c = btm_chunk_obtain(pool);
@@ -132,8 +128,12 @@ btm_slab_t *btm_slab_new(btm_partition_t *part, int sc) {
     c->live_slabs++;
     pool->nslabs++;
 
-    btm_slab_t *slab = (btm_slab_t *)((char *)c + (size_t)page * BTM_PAGE_SIZE);
-    slab_format(slab, part, sc, npages);
+    /* The descriptor lives in the chunk's descriptor array, indexed by the
+     * slab's first data page; the data is the page run itself. */
+    btm_slab_t *slab = &btm_chunk_descs(c)[page];
+    slab->first_page = (uint16_t)page;
+    slab->npages = (uint16_t)npages;
+    slab_format(slab, part, sc);
     return slab;
 }
 
@@ -371,7 +371,7 @@ size_t btm_compact(void) {
 }
 
 void btm_pool_free_one(btm_slab_t *slab, void *ptr) {
-    btm_scpool_t *pool = &slab->part->pools[slab->sc];
+    btm_scpool_t *pool = &btm_partitions[slab->part_idx].pools[slab->sc];
     pthread_mutex_lock(&pool->lock);
     *(void **)ptr = slab->free_head;
     slab->free_head = ptr;

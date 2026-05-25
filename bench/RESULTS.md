@@ -126,6 +126,31 @@ doesn't touch. Flattening it is a refill-path optimization, separate from
 async backing. Async helps the *free* path (madvise offloaded) — not visible in
 a malloc-latency bench.
 
+## Phase H — out-of-line slab metadata (and its RSS payoff)
+
+Slab descriptors were moved out of the data region into a per-chunk descriptor
+array, so data slabs are now pure slot-only pages. This was done to unblock
+meshing (Phase G), but it had a large independent payoff: **empty-slab decommit
+(Phase D) now works for small, single-page classes too** — the old inline
+header shared the page with slots and blocked it.
+
+### RSS over grow → churn → shrink → drain (MB, lower better) — updated
+
+| alloc    | peak | steady | drained |
+|----------|------|--------|---------|
+| glibc    | 182  | 190    | 187     |
+| jemalloc | 187  | 203    | 203     |
+| btmalloc | 183  | **29** | **19**  |
+
+btmalloc now holds **~6.5x less** resident memory than glibc and **~7x less**
+than jemalloc at steady state (and ~10x less drained) on this fragmenting
+workload — up from the ~2.7x of the inline-header layout. Throughput is
+unregressed (churn ~7 ns; producer/consumer still wins, 8t 8.1 vs glibc 6.1 /
+jemalloc 5.6 Mops). Mesh mode (BTM_MESH) now adds zero peak overhead, so
+btm_compact() is net-positive on top of this.
+
+(Earlier Phase B/C/D numbers below were taken with the inline-header layout.)
+
 ## Phase D — empty-slab decommit (fragmentation RSS)
 
 When a slab empties but its chunk still has survivors, all but a few warm
@@ -281,28 +306,22 @@ trivially safe single-threaded.
 **The mechanism is correct.** A shadow-map test (`test_compact`) allocates
 120k medium objects, frees 85% at random, compacts, and verifies all ~17.9k
 survivors are byte-intact after their physical pages were relocated — clean,
-including under AddressSanitizer. 4.2 MB reclaimed on that run.
+including under AddressSanitizer.
 
-**But it is not yet net-positive**, and this is the honest headline:
+**Net-positive after the out-of-line refactor (Phase H).** With data slabs now
+pure pages, mesh mode adds no peak overhead, and compaction recovers memory on
+top:
 
-| same workload (alloc 120k, free 85%) | RSS |
-|--------------------------------------|-----|
-| default mode                         | 200.7 MB |
-| mesh mode, before compact            | 218.0 MB |
-| mesh mode, after compact             | 213.9 MB |
+| same workload (alloc 120k, free 85%) | RSS after |
+|--------------------------------------|-----------|
+| default mode                         | 191.9 MB |
+| mesh mode, before compact            | 191.9 MB |
+| mesh mode, after compact             | 187.6 MB |
 
-Mesh mode gives each slab a dedicated header page (the shortcut that avoided an
-out-of-line-metadata refactor), costing ~+17 MB here; compaction recovers only
-~4 MB, so mesh mode nets out *worse* than default on this workload. Meshing
-pays off only when disjoint sparse pairs are common enough to recover more than
-that per-slab overhead.
-
-**Path to net-positive: out-of-line slab metadata.** Moving slab headers out of
-the data region (into a per-chunk descriptor array) would make data slabs pure
-slot pages — zero density penalty in mesh mode and cleaner meshing (remap all
-data pages, no header page to preserve). That is the remaining work to make
-compaction a win rather than a correctly-implemented-but-overhead-dominated
-mechanism. Fork-unsafe (MAP_SHARED); see DESIGN.
+Mesh mode now matches default at peak (zero density penalty) and btm_compact()
+reclaims 4.2 MB on top. Meshing's absolute win is still workload-dependent (it
+needs disjoint sparse pairs), but it is no longer paid for with overhead.
+Fork-unsafe (MAP_SHARED, MADV_DONTFORK'd); see DESIGN.
 
 ## Takeaways
 

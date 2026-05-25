@@ -14,9 +14,10 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full rationale and
 - **Producer/consumer (cross-thread free): fastest of the three at every thread
   count** (2–32). A freed slot returns to its home *partition* regardless of
   which thread frees it — no per-thread-arena ownership transfer to contend on.
-- **~2.7× less resident memory** after a fragmenting churn workload (72 MB
-  steady / 60 MB drained, vs glibc ~190 and jemalloc ~203) — call-site cohorting
-  plus empty-slab decommit return memory the others keep.
+- **~6.5× less resident memory** after a fragmenting churn workload (29 MB
+  steady / 19 MB drained, vs glibc ~190 and jemalloc ~203) — call-site cohorting
+  plus per-class empty-slab decommit (out-of-line slab metadata) return memory
+  the others keep.
 - **2× faster than jemalloc** on repeated grow/free cycles — a warm-chunk pool
   eliminates mmap/munmap thrash.
 - Drop-in via `LD_PRELOAD`: runs python, git, gcc, perl, bash, and parallel

@@ -46,7 +46,9 @@ static pthread_t       bg_thread;
 static struct io_uring bg_ring;
 static int             bg_ring_ok;
 
-static const size_t kData = BTM_CHUNK_SIZE - BTM_PAGE_SIZE; /* pages 1..511 */
+/* Data region of a chunk: everything after the metadata pages. */
+static const size_t kDataOff = (size_t)BTM_DATA_START_PAGE * BTM_PAGE_SIZE;
+static const size_t kData = BTM_CHUNK_SIZE - (size_t)BTM_DATA_START_PAGE * BTM_PAGE_SIZE;
 
 /* ---- mesh-mode memfd backing ---- *
  *
@@ -109,14 +111,18 @@ static void memfd_free_off(uint64_t off) {
     pthread_mutex_unlock(&memfd_lock);
 }
 
-/* Release a chunk's data pages back to the OS. */
-static void chunk_decommit(btm_chunk_t *c) {
+void btm_release_pages(void *vaddr, uint64_t memfd_off, size_t len) {
     if (btm_mesh_mode) {
         fallocate(memfd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                  (off_t)(c->memfd_off + BTM_PAGE_SIZE), (off_t)kData);
+                  (off_t)memfd_off, (off_t)len);
     } else {
-        madvise((char *)c + BTM_PAGE_SIZE, kData, MADV_DONTNEED);
+        madvise(vaddr, len, MADV_DONTNEED);
     }
+}
+
+/* Release a chunk's data pages back to the OS. */
+static void chunk_decommit(btm_chunk_t *c) {
+    btm_release_pages((char *)c + kDataOff, c->memfd_off + kDataOff, kData);
 }
 
 /* ---- low-level chunk map / header ---- */
@@ -171,7 +177,7 @@ static void chunk_init_header(btm_chunk_t *c, btm_scpool_t *pool) {
     c->magic = BTM_CHUNK_MAGIC;
     c->pool = pool;
     c->next = c->prev = NULL;
-    c->next_free_page = 1; /* page 0 is the header */
+    c->next_free_page = BTM_DATA_START_PAGE; /* pages 0..K-1 are metadata */
     c->live_slabs = 0;
     for (unsigned i = 0; i < BTM_PAGES_PER_CHUNK; i++)
         c->page_owner[i] = BTM_PAGE_NONE;
@@ -312,14 +318,13 @@ void btm_bg_atfork_child(void) {
 size_t btm_mesh_remap(btm_slab_t *donor, btm_slab_t *recipient) {
     btm_chunk_t *dc = (btm_chunk_t *)((uintptr_t)donor & ~(BTM_CHUNK_SIZE - 1));
     btm_chunk_t *rc = (btm_chunk_t *)((uintptr_t)recipient & ~(BTM_CHUNK_SIZE - 1));
-    unsigned dfp = (unsigned)(((uintptr_t)donor - (uintptr_t)dc) >> BTM_PAGE_SHIFT);
-    unsigned rfp = (unsigned)(((uintptr_t)recipient - (uintptr_t)rc) >> BTM_PAGE_SHIFT);
-    unsigned data_pages = donor->npages - 1; /* page 0 is the header */
-    size_t len = (size_t)data_pages * BTM_PAGE_SIZE;
+    /* Data regions are pure slot pages (descriptors are out of line), so the
+     * whole npages run remaps cleanly. */
+    size_t len = (size_t)donor->npages * BTM_PAGE_SIZE;
 
-    uintptr_t donor_data = (uintptr_t)donor + BTM_PAGE_SIZE;
-    uint64_t recip_off = rc->memfd_off + (uint64_t)(rfp + 1) * BTM_PAGE_SIZE;
-    uint64_t donor_off = dc->memfd_off + (uint64_t)(dfp + 1) * BTM_PAGE_SIZE;
+    uintptr_t donor_data = (uintptr_t)dc + (uint64_t)donor->first_page * BTM_PAGE_SIZE;
+    uint64_t recip_off = rc->memfd_off + (uint64_t)recipient->first_page * BTM_PAGE_SIZE;
+    uint64_t donor_off = dc->memfd_off + (uint64_t)donor->first_page * BTM_PAGE_SIZE;
 
     void *r = mmap((void *)donor_data, len, PROT_READ | PROT_WRITE,
                    MAP_SHARED | MAP_FIXED, memfd, (off_t)recip_off);

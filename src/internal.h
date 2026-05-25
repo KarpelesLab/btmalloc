@@ -70,24 +70,32 @@ typedef struct btm_chunk {
 _Static_assert(sizeof(btm_chunk_t) <= BTM_PAGE_SIZE,
                "chunk header must fit in page 0");
 
-/* ---- Slab: a run of pages dedicated to one (partition, size_class) ----
- * Header is inline at the slab's first page; slots follow it. Free slots are
- * threaded into free_head (first word = next free slot). */
+/* ---- Slab descriptor ----
+ * Out-of-line: descriptors live in a per-chunk array (chunk pages 1..K), and a
+ * slab's data is a pure run of `npages` slot-only pages starting at
+ * `first_page` in the same chunk. So data pages carry no header and are fully
+ * remappable (needed for meshing); the chunk that owns a descriptor is found by
+ * masking the descriptor's own address. Free slots are threaded into free_head. */
 struct btm_slab {
-    uint64_t         magic;       /* reserved; chunk magic is the gate */
-    btm_partition_t *part;        /* home partition */
     void            *free_head;   /* intra-slab freelist */
-    btm_slab_t      *next, *prev; /* membership in pool->partial */
+    btm_slab_t      *next, *prev; /* membership in pool->partial / empty lists */
     uint32_t         nslots;      /* total slots in this slab */
     uint32_t         free_count;  /* slots currently in free_head */
     uint16_t         sc;          /* size class index */
-    uint16_t         npages;      /* pages spanned */
+    uint16_t         npages;      /* data pages spanned */
     uint16_t         part_idx;    /* owning partition index (for bin lookup) */
+    uint16_t         first_page;  /* index of the slab's first data page */
     uint8_t          in_partial;  /* on the pool's partial list? */
-    uint8_t          decommitted; /* data pages released via MADV_DONTNEED? */
-    uint8_t          retired;     /* meshed: no new allocations (mesh mode) */
-    uint8_t          _pad2[3];
+    uint8_t          decommitted; /* data pages released to the OS? */
+    uint8_t          retired;     /* meshed: no new allocations */
+    uint8_t          _pad;
 };
+
+/* Number of metadata pages per chunk: page 0 (chunk header) + the descriptor
+ * array (one descriptor per potential data page). Data slabs start after. */
+#define BTM_DESC_PAGES \
+    ((BTM_PAGES_PER_CHUNK * sizeof(btm_slab_t) + BTM_PAGE_SIZE - 1) / BTM_PAGE_SIZE)
+#define BTM_DATA_START_PAGE (1u + BTM_DESC_PAGES)
 
 /* ---- Size-class pool: per (partition, size_class) ----
  * Owns its own chunks so a pool's memory can be released wholesale when its
@@ -202,6 +210,9 @@ int         btm_mesh_enable(void) BTM_HIDDEN;
 /* Remap donor's data region onto recipient's and release donor's pages.
  * Returns bytes reclaimed. Caller holds the pool lock; heap must be quiescent. */
 size_t      btm_mesh_remap(btm_slab_t *donor, btm_slab_t *recipient) BTM_HIDDEN;
+/* Release physical pages of [vaddr, vaddr+len): PUNCH_HOLE in mesh mode (memfd
+ * at `memfd_off`), MADV_DONTNEED otherwise. */
+void        btm_release_pages(void *vaddr, uint64_t memfd_off, size_t len) BTM_HIDDEN;
 /* Register / unregister the 2 MiB regions [base, base+len) -> owner. */
 void        btm_registry_insert(uintptr_t base, size_t len, uintptr_t owner) BTM_HIDDEN;
 void        btm_registry_remove(uintptr_t base, size_t len) BTM_HIDDEN;
@@ -220,22 +231,23 @@ static inline uintptr_t btm_resolve_owner(btm_tls_t *t, const void *ptr) {
     return owner;
 }
 
-/* Given a pointer known to live in chunk `c`, return its slab. */
-static inline btm_slab_t *btm_slab_of(btm_chunk_t *c, const void *ptr) {
-    uint32_t page = (uint32_t)(((uintptr_t)ptr - (uintptr_t)c) >> BTM_PAGE_SHIFT);
-    uint16_t owner = c->page_owner[page];
-    return (btm_slab_t *)((char *)c + (size_t)owner * BTM_PAGE_SIZE);
+/* The chunk's descriptor array (lives in chunk pages 1..K). */
+static inline btm_slab_t *btm_chunk_descs(btm_chunk_t *c) {
+    return (btm_slab_t *)((char *)c + BTM_PAGE_SIZE);
 }
 
-/* ---- slab geometry ----
- * In mesh mode a slab reserves its whole first page for the header so the
- * remaining pages form a fully-remappable, slot-only data region; otherwise the
- * header is inline and slots follow it. Returns the data base and slot count. */
+/* Given a pointer known to live in chunk `c`, return its slab descriptor. */
+static inline btm_slab_t *btm_slab_of(btm_chunk_t *c, const void *ptr) {
+    uint32_t page = (uint32_t)(((uintptr_t)ptr - (uintptr_t)c) >> BTM_PAGE_SHIFT);
+    uint16_t fp = c->page_owner[page]; /* the owning slab's first data page */
+    return &btm_chunk_descs(c)[fp];
+}
+
+/* The slot-only data region of a slab: `npages` pages starting at first_page
+ * in the descriptor's own chunk. */
 static inline char *btm_slab_data(const btm_slab_t *slab) {
-    extern int btm_mesh_mode;
-    if (btm_mesh_mode) return (char *)slab + BTM_PAGE_SIZE;
-    size_t hdr = (sizeof(btm_slab_t) + 15) & ~(size_t)15;
-    return (char *)slab + hdr;
+    btm_chunk_t *c = (btm_chunk_t *)((uintptr_t)slab & ~(BTM_CHUNK_SIZE - 1));
+    return (char *)c + (size_t)slab->first_page * BTM_PAGE_SIZE;
 }
 
 /* ---- partition.c: slab pools, carving, refill/flush, reclaim ---- */
