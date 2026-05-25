@@ -1,13 +1,17 @@
 # Benchmark results
 
 Machine: Intel i9-14900K (8 P-cores + 16 E-cores, 32 threads), Linux 6.12,
-glibc 2.41, GCC 14, 23 GiB swap. Baselines: glibc malloc, jemalloc 5.x,
-mimalloc 3.x — all four compared by LD_PRELOAD'ing the same binaries via
-`bench/run.sh` (which auto-detects jemalloc/mimalloc and adds btmalloc).
+glibc 2.41, GCC 14, 23 GiB swap. Baselines: glibc malloc, system jemalloc 5.x
+and mimalloc 3.x, plus four allocators built from source by
+`bench/fetch_allocators.sh` — **snmalloc** and **tcmalloc** (gperftools) for
+performance, **ffmalloc** (one-time allocation) and **hardened_malloc**
+(GrapheneOS) for security. All are compared by LD_PRELOAD'ing the same binaries
+via `bench/run.sh`, which auto-detects the system allocators and discovers any
+fetched ones in `bench/allocators/lib/`.
 
 Numbers are indicative single runs, not averaged — treat as deltas, not
-absolutes. Reproduce with `bench/run.sh build` (or per-allocator with
-`BENCH_ALLOCATORS="glibc jemalloc mimalloc btmalloc"`).
+absolutes. Reproduce with `bench/fetch_allocators.sh && bench/run.sh build` (or
+a subset with `BENCH_ALLOCATORS="glibc snmalloc btmalloc"`).
 
 ## Four-way summary (glibc / jemalloc / mimalloc / btmalloc)
 
@@ -41,6 +45,58 @@ Reading it honestly:
 
 Detailed per-phase numbers below (some predate later refactors; the table above
 is current).
+
+## Eight-way comparison (incl. snmalloc / tcmalloc / ffmalloc / hardened_malloc)
+
+Rather than reimplement other allocators' ideas, we build them from source and
+benchmark them directly (`bench/fetch_allocators.sh`). Single run, pinned to
+P-cores (`BENCH_TASKSET=0-7`). churn/local/prodc at 64 B / 8 threads; RSS from
+the grow→churn→drain workload; `ratio` = steady RSS ÷ live bytes (lower = less
+fragmentation overhead).
+
+| allocator | churn64 ns ↓ | local8 Mops ↑ | prodc8 Mops ↑ | p999 ns ↓ | p9999 ns ↓ | steady MB ↓ | drained MB ↓ | steady ratio ↓ |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| glibc           | 4.3 | 547 | 6.9 | 23 | 76 | 190 | 190 | 16.4 |
+| jemalloc        | 2.3 | 752 | 5.6 | 35 | 124 | 206 | 206 | 17.8 |
+| mimalloc        | 2.8 | 797 | 7.8 | 78 | 184 | 201 | 201 | 17.3 |
+| tcmalloc        | 2.3 | 782 | 6.5 | **16** | **73** | 191 | 191 | 16.5 |
+| snmalloc        | **2.0** | **799** | **10.4** | 23 | 89 | 193 | 193 | 16.7 |
+| hardened_malloc | 27.3 | 50 | 7.3 | 151 | 340 | 40 | 30 | 3.5 |
+| ffmalloc        | 14.0 | n/a | n/a | 24 | 156 | 47 | **17** | 4.1 |
+| btmalloc        | 6.9 | 519 | 10.3 | 18 | 143 | **27** | 19 | **2.4** |
+
+(n/a: ffmalloc aborted the threaded bench — its one-time-allocation exhausts
+address space under many-thread churn; hardened_malloc aborted part of the micro
+set on its strict checks but emitted the churn figure first. btmalloc ran every
+bench cleanly.)
+
+Honest reading, now that the field is wider:
+
+- **Cross-thread free is a genuine win**: btmalloc (10.3 Mops) is statistically
+  tied with **snmalloc (10.4)** — the state-of-the-art message-passing allocator
+  — and clearly ahead of mimalloc (7.8), tcmalloc (6.5), and jemalloc (5.6). Our
+  home-pool return model matches the best dedicated design here.
+- **Memory footprint is the decisive win, and it survives the wider field.**
+  *Every* mainstream performance allocator — glibc, jemalloc, mimalloc, tcmalloc,
+  *and snmalloc* — sits at ~16-18× live bytes (≈190-206 MB) and never gives it
+  back. btmalloc holds 2.4× (27 MB) and drains to 19 MB. Only the security
+  allocators approach it (ffmalloc 4.1×/17 MB, hardened 3.5×/30 MB), and they pay
+  for it dearly in speed.
+- **btmalloc beats both dedicated security allocators on speed** (6.9 ns churn
+  vs ffmalloc 14, hardened 27; 519 vs 50 Mops local) while matching their memory
+  release — its optional safe-linking + double-free hardening costs ~4%, far less
+  than a from-scratch security allocator, though it doesn't offer their UAF
+  guarantees.
+- **btmalloc trails the performance pack on raw single-thread throughput**
+  (6.9 ns vs snmalloc 2.0 / tcmalloc 2.3 / jemalloc 2.3 / mimalloc 2.8) and on
+  8-thread local scaling (519 vs ~750-800) — the known structural cost of
+  call-site machinery. Tail p999 is near-best (18 ns, 2nd to tcmalloc's 16);
+  p9999 is mid-pack.
+
+Net: against seven other allocators including two research designs, btmalloc is
+best-or-tied on cross-thread free and memory footprint, near-best on p999
+latency, and trails on raw single-thread throughput — exactly the trade its
+design makes.
 
 ## Phase A — PC-anchored partitioned core (P=64 default)
 

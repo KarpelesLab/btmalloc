@@ -35,3 +35,6 @@ bench/results/*.csv
 core
 core.*
 *.dSYM/
+
+# Third-party allocators fetched for comparison (bench/fetch_allocators.sh)
+bench/allocators/

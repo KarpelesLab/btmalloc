@@ -52,6 +52,13 @@ else
     allocs=(glibc)
     [[ -n "$jemalloc_so" && -e "$jemalloc_so" ]] && allocs+=(jemalloc)
     [[ -n "$mimalloc_so" && -e "$mimalloc_so" ]] && allocs+=(mimalloc)
+    # Third-party allocators fetched by bench/fetch_allocators.sh (snmalloc,
+    # tcmalloc, ffmalloc, hardened_malloc, ...): each as lib/<name>.so.
+    if compgen -G "$root/bench/allocators/lib/*.so" >/dev/null 2>&1; then
+        for so in "$root"/bench/allocators/lib/*.so; do
+            allocs+=("$(basename "$so" .so)")
+        done
+    fi
     [[ -e "$btmalloc_so" ]] && allocs+=(btmalloc)
 fi
 
@@ -78,7 +85,11 @@ preload_for() {
         jemalloc) echo "$jemalloc_so" ;;
         mimalloc) echo "$mimalloc_so" ;;
         btmalloc) echo "$btmalloc_so" ;;
-        *)        echo "" ;;
+        *)
+            # Fetched third-party allocator: bench/allocators/lib/<name>.so
+            local cand="$root/bench/allocators/lib/$1.so"
+            [[ -e "$cand" ]] && echo "$cand" || echo ""
+            ;;
     esac
 }
 

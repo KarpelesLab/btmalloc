@@ -131,8 +131,19 @@ Raise `BTM_PARTITIONS` for finer attribution.
 
 ```sh
 cmake -S . -B build -DBTM_BUILD_BENCH=ON && cmake --build build -j
-bench/run.sh build          # compares glibc vs jemalloc vs btmalloc
+bench/run.sh build          # compares glibc vs jemalloc vs mimalloc vs btmalloc
 ```
+
+To compare against more allocators, fetch and build them from source first —
+`bench/run.sh` then auto-discovers them:
+
+```sh
+bench/fetch_allocators.sh   # builds snmalloc, tcmalloc, ffmalloc, hardened_malloc
+bench/run.sh build          # now an 8-way comparison
+```
+
+See [bench/RESULTS.md](bench/RESULTS.md) for the eight-way results (btmalloc is
+tied with snmalloc on cross-thread free and tightest on memory footprint).
 
 ## Status
 
